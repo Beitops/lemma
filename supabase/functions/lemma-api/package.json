@@ -1,0 +1,20 @@
+{
+  "name": "@lemma/edge-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@lemma/contracts": "workspace:*",
+    "@supabase/supabase-js": "2.112.4",
+    "zod": "4.5.2"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

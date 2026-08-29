@@ -1,0 +1,40 @@
+{
+  "name": "@lemma/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.json --noEmit && vite build"
+  },
+  "dependencies": {
+    "@dagrejs/dagre": "3.1.1",
+    "@lemma/contracts": "workspace:*",
+    "@supabase/supabase-js": "2.112.4",
+    "@xyflow/react": "12.11.5",
+    "katex": "0.18.4",
+    "lucide-react": "1.37.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-markdown": "10.1.0",
+    "react-router-dom": "7.18.3",
+    "rehype-katex": "7.0.1",
+    "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
+    "tus-js-client": "4.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.6",
+    "@types/katex": "0.16.8",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "6.1.1",
+    "jsdom": "30.0.1",
+    "vite": "8.2.2",
+    "webmcp-types": "0.1.5"
+  }
+}

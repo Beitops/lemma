@@ -1,0 +1,14 @@
+# Deployed Edge Functions at 2026-09-02T00:08:58Z
+
+lemma-api  version=4  verify_jwt=false  bundle_sha256=2b113329cc2c526c158948b7655f44f0935695565eafa66de10c7534dbb1c578
+  supabase/functions/lemma-api/index.ts     fnv1a64=545567b5b42460cd  bytes=671
+  supabase/functions/lemma-api/handler.ts   fnv1a64=111b3e37bb86479a  bytes=74185
+  packages/contracts/src/index.ts           fnv1a64=923186fee5494516  bytes=66230
+  supabase/functions/lemma-api/deno.json    fnv1a64=19f88d8f42048cdb  bytes=184
+
+embed-steps  version=3  verify_jwt=false  bundle_sha256=844606d0ef7c4fcdce7f1cb24d7845e5b76490f3c8ba7ca42dba16d732de35c6
+  supabase/functions/embed-steps/index.ts   fnv1a64=e75d26388dcb4771  bytes=1020
+  supabase/functions/embed-steps/handler.ts fnv1a64=559bba0ed1f7ef91  bytes=11603
+  supabase/functions/embed-steps/deno.json  fnv1a64=2a820d70c379db8c  bytes=88
+
+Both deployed bundles matched commit fc0262e572ae763a57dd7c2715f757a0571794ad byte-for-byte at capture time.

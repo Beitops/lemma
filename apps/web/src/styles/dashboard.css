@@ -1,0 +1,67 @@
+.dashboard-page { min-height: 100vh; background-color: var(--paper); background-image: radial-gradient(circle at 1px 1px, rgb(88 75 95 / 0.085) 1px, transparent 0); background-size: 26px 26px; }
+.dashboard-header { position: sticky; z-index: 20; top: 0; display: flex; min-height: 72px; align-items: center; justify-content: space-between; gap: 24px; padding: 0 clamp(22px, 4vw, 62px); background: rgb(243 240 232 / 0.88); border-bottom: 1px solid rgb(199 190 178 / 0.7); backdrop-filter: blur(18px); }
+.dashboard-header__tools { display: flex; align-items: center; gap: 12px; }
+.global-search { display: grid; width: min(300px, 26vw); height: 40px; grid-template-columns: 20px 1fr auto; align-items: center; gap: 7px; padding: 0 9px 0 12px; background: rgb(255 253 248 / 0.7); border: 1px solid var(--line); border-radius: 10px; }
+.global-search svg { width: 15px; height: 15px; color: #8d858f; }
+.global-search input { min-width: 0; background: transparent; border: 0; outline: none; font-size: 12px; }
+.global-search kbd { padding: 3px 6px; color: #8c848d; background: #ece7de; border: 1px solid #d9d1c7; border-radius: 5px; font: 9px ui-monospace, monospace; }
+.agent-chip { display: inline-flex; min-height: 32px; align-items: center; gap: 6px; padding: 5px 9px; color: #716a73; background: #ebe7de; border: 1px solid #d8d2c8; border-radius: 999px; font-size: 10px; font-weight: 750; white-space: nowrap; }
+.agent-chip > span { width: 6px; height: 6px; background: #a69fa7; border-radius: 50%; }
+.agent-chip svg { width: 13px; height: 13px; }
+.agent-chip.is-live { color: #326c59; background: #e1f0e7; border-color: #c3dfce; }
+.agent-chip.is-live > span { background: #40a46d; box-shadow: 0 0 0 3px rgb(64 164 109 / 0.12); }
+.user-menu { display: flex; align-items: center; gap: 8px; padding-left: 3px; }
+.avatar { display: grid; width: 33px; height: 33px; place-items: center; color: #fff; background: var(--plum); border-radius: 10px; font-size: 10px; font-weight: 800; }
+.user-menu__email { max-width: 150px; overflow: hidden; color: #655e68; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+
+.dashboard-main { width: min(1280px, calc(100% - 44px)); margin: 0 auto; padding: clamp(54px, 7vw, 92px) 0 34px; }
+.dashboard-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 32px; margin-bottom: 64px; }
+.dashboard-hero h1 { margin: 11px 0 14px; font-family: Georgia, "Times New Roman", serif; font-size: clamp(48px, 6.2vw, 84px); font-weight: 400; letter-spacing: -0.07em; line-height: 0.9; }
+.dashboard-hero h1 em { color: var(--plum); font-style: italic; font-weight: 400; }
+.dashboard-hero p { max-width: 580px; margin: 0; color: var(--muted); font-size: 15px; line-height: 1.65; }
+.dashboard-hero > .button { min-height: 48px; padding: 11px 18px; margin-bottom: 8px; }
+.section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
+.section-heading h2 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 27px; letter-spacing: -0.04em; }
+.section-heading > div > span { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; }
+.text-action { display: inline-flex; align-items: center; gap: 3px; padding: 6px; color: #776f79; background: transparent; border: 0; cursor: pointer; font-size: 11px; font-weight: 650; }
+.text-action svg { width: 14px; height: 14px; }
+.workspace-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 17px; }
+.workspace-card { min-width: 0; padding: 0; overflow: hidden; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: 0 1px 2px rgb(35 31 40 / 0.03); cursor: pointer; transition: 200ms cubic-bezier(.2,.8,.2,1); }
+.workspace-card:hover { border-color: #bfb4c4; box-shadow: 0 16px 36px rgb(35 31 40 / 0.1); transform: translateY(-4px); }
+.workspace-card:active { transform: translateY(-1px); }
+.workspace-mini-graph { position: relative; height: 142px; overflow: hidden; background: #ede8df; }
+.workspace-mini-graph::before { position: absolute; inset: 0; background-image: linear-gradient(rgb(35 31 40 / 0.04) 1px, transparent 1px), linear-gradient(90deg, rgb(35 31 40 / 0.04) 1px, transparent 1px); background-size: 22px 22px; content: ""; }
+.workspace-mini-graph--violet { background: #ece6f5; }
+.workspace-mini-graph--coral { background: #f5e8e2; }
+.workspace-mini-graph--teal { background: #e0efeb; }
+.mini-node, .mini-edge { position: absolute; display: block; }
+.mini-node { z-index: 2; width: 38px; height: 25px; background: var(--surface); border: 1px solid rgb(35 31 40 / 0.15); border-radius: 7px; box-shadow: 0 3px 8px rgb(35 31 40 / 0.09); }
+.mini-node--one { top: 59px; left: 12%; }
+.mini-node--two { top: 59px; left: 38%; }
+.mini-node--three { top: 31px; left: 65%; }
+.mini-node--four { top: 88px; left: 65%; }
+.mini-edge { z-index: 1; height: 1px; background: rgb(35 31 40 / 0.3); transform-origin: left; }
+.mini-edge--one { top: 72px; left: calc(12% + 38px); width: calc(26% - 38px); }
+.mini-edge--two { top: 72px; left: calc(38% + 38px); width: calc(27% - 38px); transform: rotate(-17deg); }
+.mini-edge--fork { top: 72px; left: calc(38% + 38px); width: calc(27% - 38px); transform: rotate(17deg); }
+.workspace-mini-graph--violet .mini-node--three, .workspace-mini-graph--violet .mini-node--four { border-color: #ac92da; }
+.workspace-mini-graph--coral .mini-node--three, .workspace-mini-graph--coral .mini-node--four { border-color: #d9988e; }
+.workspace-mini-graph--teal .mini-node--three, .workspace-mini-graph--teal .mini-node--four { border-color: #7ab9b1; }
+.workspace-card__body { padding: 17px 18px 16px; }
+.workspace-card__topline { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #99919a; font-size: 9px; font-weight: 650; }
+.workspace-kind { display: inline-flex; align-items: center; gap: 5px; color: #6c6470; font-weight: 750; letter-spacing: 0.04em; text-transform: uppercase; }
+.workspace-kind svg { width: 12px; height: 12px; }
+.workspace-card h3 { margin: 12px 0 7px; overflow: hidden; font-family: Georgia, "Times New Roman", serif; font-size: 20px; letter-spacing: -0.035em; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-card__objective { display: -webkit-box; min-height: 39px; margin: 0; overflow: hidden; color: #766f78; font-size: 11px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.workspace-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 17px; padding-top: 12px; color: #8a828c; border-top: 1px solid #e8e2da; font-size: 9px; }
+.workspace-card__footer span { display: inline-flex; align-items: center; gap: 5px; }
+.workspace-card__footer svg { width: 12px; height: 12px; }
+.workspace-card__open { color: var(--plum); font-weight: 750; }
+.workspace-card--new { display: flex; min-height: 320px; align-items: center; justify-content: center; flex-direction: column; gap: 5px; color: #8a828b; background: rgb(255 253 248 / 0.42); border-style: dashed; text-align: center; }
+.workspace-card--new__icon { display: grid; width: 45px; height: 45px; margin-bottom: 5px; place-items: center; color: var(--plum); background: var(--plum-soft); border-radius: 14px; }
+.workspace-card--new b { color: #5d5661; font-size: 13px; }
+.workspace-card--new > span:last-child { font-size: 10px; }
+.workspace-card-skeleton { height: 320px; background: linear-gradient(100deg, #eae5dc 30%, #f4f1ea 50%, #eae5dc 70%); background-size: 200% 100%; border-radius: 18px; animation: shimmer 1.2s infinite; }
+@keyframes shimmer { to { background-position-x: -200%; } }
+@media (max-width: 950px) { .workspace-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .global-search { display: none; } }
+@media (max-width: 650px) { .dashboard-header { min-height: 64px; padding: 0 16px; } .user-menu__email, .agent-chip { display: none; } .dashboard-main { width: calc(100% - 28px); padding-top: 42px; } .dashboard-hero { align-items: flex-start; flex-direction: column; margin-bottom: 44px; } .dashboard-hero h1 { font-size: 50px; } .workspace-grid { grid-template-columns: 1fr; } .workspace-card--new { min-height: 150px; } }

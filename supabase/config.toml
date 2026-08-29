@@ -1,0 +1,10 @@
+project_id = "lemma"
+
+# `lemma-api` authenticates every non-public route itself so it can preserve
+# Lemma's stable JSON error envelope for malformed or expired bearer tokens.
+[functions.lemma-api]
+verify_jwt = false
+
+# This internal worker validates its cron/Vault token in Postgres RPCs.
+[functions.embed-steps]
+verify_jwt = false

@@ -1,0 +1,32 @@
+{
+  "name": "lemma",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An IDE for human-agent mathematical reasoning.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.8.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @lemma/web dev",
+    "edge:serve": "supabase functions serve lemma-api --env-file .env.local --no-verify-jwt",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "build": "pnpm -r --if-present build",
+    "db:test": "supabase test db"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@vitest/coverage-v8": "4.1.11",
+    "eslint": "10.9.1",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.5",
+    "globals": "17.11.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.68.0",
+    "vitest": "4.1.11"
+  }
+}
