@@ -139,7 +139,10 @@ export default function App() {
     );
 
     let workspaceRoute: ReactNode;
-    if (workspace.loading && !workspace.overview) {
+    // The route renders once before useWorkspace starts its loading effect.
+    // Missing data is therefore pending until an explicit load error exists.
+    const awaitingWorkspace = !workspace.overview && (workspace.loading || !workspace.error);
+    if (awaitingWorkspace) {
       workspaceRoute = <LoadingScreen />;
     } else if (workspace.error || !workspace.overview) {
       workspaceRoute = (
