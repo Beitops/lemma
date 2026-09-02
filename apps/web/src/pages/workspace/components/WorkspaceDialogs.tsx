@@ -22,6 +22,7 @@ import {
   Plus,
   Sparkles,
   Target,
+  TriangleAlert,
   Type,
 } from "lucide-react";
 import { MarkdownMath, MathText } from "../../../components/MarkdownMath";
@@ -80,8 +81,19 @@ export interface ResultDraft {
   target_type: "strategy" | "branch";
 }
 
+function RevisionConflictNotice({ message }: { message: string | null | undefined }) {
+  if (!message) return null;
+  return (
+    <div aria-live="assertive" className="form-message form-message--error" role="alert">
+      <TriangleAlert />
+      <span>{message}</span>
+    </div>
+  );
+}
+
 interface ObjectiveDialogProps {
   busy: boolean;
+  conflict?: string | null;
   draft: ObjectiveDraft;
   editing: boolean;
   onChange: (field: keyof ObjectiveDraft, value: string) => void;
@@ -90,7 +102,7 @@ interface ObjectiveDialogProps {
   open: boolean;
 }
 
-export function ObjectiveDialog({ busy, draft, editing, onChange, onClose, onSubmit, open }: ObjectiveDialogProps) {
+export function ObjectiveDialog({ busy, conflict, draft, editing, onChange, onClose, onSubmit, open }: ObjectiveDialogProps) {
   return (
     <Modal
       description={editing
@@ -102,6 +114,7 @@ export function ObjectiveDialog({ busy, draft, editing, onChange, onClose, onSub
       wide
     >
       <form className="stack-form" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+        <RevisionConflictNotice message={conflict} />
         <label>
           <span>Objective title</span>
           <input autoFocus data-autofocus maxLength={240} onChange={(event) => onChange("title", event.target.value)} placeholder="e.g. Classify primitive Pythagorean triples" required value={draft.title} />
@@ -124,7 +137,7 @@ export function ObjectiveDialog({ busy, draft, editing, onChange, onClose, onSub
         </label>
         <div className="modal__actions">
           <Button onClick={onClose} tone="ghost">Cancel</Button>
-          <Button busy={busy} icon={<Target />} type="submit">{editing ? "Save objective" : "Create objective"}</Button>
+          <Button busy={busy} disabled={Boolean(conflict)} icon={<Target />} type="submit">{editing ? "Save objective" : "Create objective"}</Button>
         </div>
       </form>
     </Modal>
@@ -168,6 +181,7 @@ export function StrategyDialog({ busy, draft, onChange, onClose, onSubmit, open 
 interface StepDialogProps {
   branchName: string;
   busy: boolean;
+  conflict?: string | null;
   draft: StepDraft;
   editing: boolean;
   onChange: (field: keyof StepDraft, value: string) => void;
@@ -176,7 +190,7 @@ interface StepDialogProps {
   open: boolean;
 }
 
-export function StepDialog({ branchName, busy, draft, editing, onChange, onClose, onSubmit, open }: StepDialogProps) {
+export function StepDialog({ branchName, busy, conflict, draft, editing, onChange, onClose, onSubmit, open }: StepDialogProps) {
   return (
     <Modal
       description={editing
@@ -188,6 +202,7 @@ export function StepDialog({ branchName, busy, draft, editing, onChange, onClose
       wide
     >
       <form className="step-form" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+        <RevisionConflictNotice message={conflict} />
         <div className="form-grid form-grid--step-head">
           <label>
             <span>Step title</span>
@@ -230,7 +245,7 @@ export function StepDialog({ branchName, busy, draft, editing, onChange, onClose
         <div className="modal__actions">
           <span className="form-hint"><Check /> Markdown is stored; HTML is never accepted.</span>
           <Button onClick={onClose} tone="ghost">Cancel</Button>
-          <Button busy={busy} icon={editing ? <Clipboard /> : <ArrowRight />} type="submit">{editing ? "Save revision" : "Add step"}</Button>
+          <Button busy={busy} disabled={Boolean(conflict)} icon={editing ? <Clipboard /> : <ArrowRight />} type="submit">{editing ? "Save revision" : "Add step"}</Button>
         </div>
       </form>
     </Modal>
@@ -272,6 +287,7 @@ export function BranchDialog({ busy, draft, forkStep, onChange, onClose, onSubmi
 
 interface AssumptionDialogProps {
   busy: boolean;
+  conflict?: string | null;
   draft: AssumptionDraft;
   onChange: (field: keyof AssumptionDraft, value: string) => void;
   onClose: () => void;
@@ -279,10 +295,11 @@ interface AssumptionDialogProps {
   open: boolean;
 }
 
-export function AssumptionDialog({ busy, draft, onChange, onClose, onSubmit, open }: AssumptionDialogProps) {
+export function AssumptionDialog({ busy, conflict, draft, onChange, onClose, onSubmit, open }: AssumptionDialogProps) {
   return (
     <Modal description="First-class assumptions make dependent conclusions queryable." onClose={onClose} open={open} title="Mark an assumption">
       <form className="stack-form" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+        <RevisionConflictNotice message={conflict} />
         <label><span>Short label</span><input autoFocus data-autofocus maxLength={160} onChange={(event) => onChange("label", event.target.value)} placeholder="Continuity on the closed interval" required value={draft.label} /></label>
         <label><span>Statement</span><textarea maxLength={100_000} onChange={(event) => onChange("statement_markdown", event.target.value)} placeholder="State the assumption precisely in Markdown + TeX." required rows={5} value={draft.statement_markdown} /></label>
         <div className="form-grid form-grid--two">
@@ -290,7 +307,7 @@ export function AssumptionDialog({ busy, draft, onChange, onClose, onSubmit, ope
           <label><span>Status</span><select onChange={(event) => onChange("status", event.target.value)} value={draft.status}><option value="proposed">Proposed</option><option value="accepted">Accepted</option><option value="challenged">Challenged</option></select></label>
         </div>
         <label><span>Note <em>optional</em></span><textarea onChange={(event) => onChange("note_markdown", event.target.value)} rows={3} value={draft.note_markdown} /></label>
-        <div className="modal__actions"><Button onClick={onClose} tone="ghost">Cancel</Button><Button busy={busy} icon={<Sparkles />} type="submit">Attach assumption</Button></div>
+        <div className="modal__actions"><Button onClick={onClose} tone="ghost">Cancel</Button><Button busy={busy} disabled={Boolean(conflict)} icon={<Sparkles />} type="submit">Attach assumption</Button></div>
       </form>
     </Modal>
   );
@@ -454,6 +471,7 @@ export function CleanSolutionDialog({ busy, onClose, onCopy, onGenerate, onSave,
 interface ResultDialogProps {
   branches: Branch[];
   busy: boolean;
+  conflict?: string | null;
   draft: ResultDraft;
   existingResult: ReasoningResult | null;
   onChange: (field: keyof ResultDraft, value: string) => void;
@@ -466,6 +484,7 @@ interface ResultDialogProps {
 export function ResultDialog({
   branches,
   busy,
+  conflict,
   draft,
   existingResult,
   onChange,
@@ -487,6 +506,7 @@ export function ResultDialog({
       wide
     >
       <form className="stack-form" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+        <RevisionConflictNotice message={conflict} />
         <div className="form-grid form-grid--two">
           <label>
             <span>Attach outcome to</span>
@@ -543,7 +563,7 @@ export function ResultDialog({
         </div>
         <div className="modal__actions">
           <Button onClick={onClose} tone="ghost">Cancel</Button>
-          <Button busy={busy} icon={<Check />} type="submit">
+          <Button busy={busy} disabled={Boolean(conflict)} icon={<Check />} type="submit">
             {editing ? "Save outcome revision" : "Record outcome"}
           </Button>
         </div>

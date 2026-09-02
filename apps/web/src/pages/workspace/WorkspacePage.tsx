@@ -16,9 +16,11 @@ import {
   LoaderCircle,
   Maximize2,
   Plus,
+  Radio,
   RefreshCw,
   ScrollText,
   Target,
+  WifiOff,
 } from "lucide-react";
 import {
   lazy,
@@ -29,6 +31,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { useWorkspaceViewState } from "./hooks/useWorkspaceViewState";
+import type { WorkspaceRealtimeStatus } from "./hooks/useWorkspaceRealtime";
 import { cx } from "../../lib/ui";
 import { BoardFocusControls } from "./components/BoardFocusControls";
 import { Brand } from "../../components/Brand";
@@ -171,12 +174,14 @@ export interface WorkspacePageActions {
 
 interface WorkspacePageProps {
   actions: WorkspacePageActions;
+  draftConflict?: string | null;
   expandedObjectiveIds: string[];
   graph: ObjectiveGraph | null;
   loadingObjectiveIds: string[];
   objectiveStrategies: Record<string, ObjectiveStrategyGroup | undefined>;
   overview: WorkspaceOverview;
   pendingDecisions?: DecisionInboxItem[];
+  realtimeStatus?: WorkspaceRealtimeStatus;
   state: WorkspacePageState;
   webMcpAvailable: boolean;
 }
@@ -202,12 +207,14 @@ function ObjectiveBoardEmpty({
 
 export function WorkspacePage({
   actions,
+  draftConflict = null,
   expandedObjectiveIds,
   graph,
   loadingObjectiveIds,
   objectiveStrategies,
   overview,
   pendingDecisions = [],
+  realtimeStatus = "offline",
   state,
   webMcpAvailable,
 }: WorkspacePageProps) {
@@ -380,6 +387,12 @@ export function WorkspacePage({
   const isLoadingObjective = hasObjectives && graph === null;
   const generalContextItems = graph?.general_context_items ?? overview.general_context_items;
   const objectiveContextItems = graph?.objective_context_items ?? [];
+  const realtimeLabel = {
+    connecting: "Connecting live sync",
+    degraded: "Live sync degraded",
+    live: "Live sync on",
+    offline: "Offline · manual refresh available",
+  }[realtimeStatus];
 
   return (
     <div
@@ -405,6 +418,18 @@ export function WorkspacePage({
             </span>
           </div>
           <div className="workspace-topbar__actions">
+            <span
+              aria-live="polite"
+              className={`realtime-indicator is-${realtimeStatus}`}
+              title={realtimeLabel}
+            >
+              {realtimeStatus === "connecting"
+                ? <LoaderCircle className="spin" />
+                : realtimeStatus === "live"
+                  ? <Radio />
+                  : <WifiOff />}
+              {realtimeLabel}
+            </span>
             {state.refreshing && <span className="saving-indicator"><LoaderCircle className="spin" /> Syncing</span>}
             <IconButton label="Refresh workspace" onClick={actions.refresh}><RefreshCw /></IconButton>
             {graph && <>
@@ -535,16 +560,16 @@ export function WorkspacePage({
         {graph && !viewState.isBoardFocused && !selectedStep && inspectedStrategy && renderStrategyInspector("column")}
       </div>
 
-      <ObjectiveDialog busy={state.busy} draft={state.objectiveDraft} editing={state.editingObjectiveId !== null} onChange={actions.setObjectiveDraft} onClose={actions.closeDialog} onSubmit={state.editingObjectiveId ? actions.updateObjective : actions.createObjective} open={state.activeDialog === "objective"} />
+      <ObjectiveDialog busy={state.busy} conflict={draftConflict} draft={state.objectiveDraft} editing={state.editingObjectiveId !== null} onChange={actions.setObjectiveDraft} onClose={actions.closeDialog} onSubmit={state.editingObjectiveId ? actions.updateObjective : actions.createObjective} open={state.activeDialog === "objective"} />
       <StrategyDialog busy={state.busy} draft={state.strategyDraft} onChange={actions.setStrategyDraft} onClose={actions.closeDialog} onSubmit={actions.createStrategy} open={state.activeDialog === "strategy"} />
-      <StepDialog branchName={targetBranch?.name ?? "Selected branch"} busy={state.busy} draft={state.stepDraft} editing={state.editingStepId !== null} onChange={actions.setStepDraft} onClose={actions.closeDialog} onSubmit={actions.submitStep} open={state.activeDialog === "step"} />
+      <StepDialog branchName={targetBranch?.name ?? "Selected branch"} busy={state.busy} conflict={draftConflict} draft={state.stepDraft} editing={state.editingStepId !== null} onChange={actions.setStepDraft} onClose={actions.closeDialog} onSubmit={actions.submitStep} open={state.activeDialog === "step"} />
       <BranchDialog busy={state.busy} draft={state.branchDraft} forkStep={targetStep} onChange={actions.setBranchDraft} onClose={actions.closeDialog} onSubmit={actions.createBranch} open={state.activeDialog === "branch"} />
-      <AssumptionDialog busy={state.busy} draft={state.assumptionDraft} onChange={actions.setAssumptionDraft} onClose={actions.closeDialog} onSubmit={actions.createAssumption} open={state.activeDialog === "assumption"} />
+      <AssumptionDialog busy={state.busy} conflict={draftConflict} draft={state.assumptionDraft} onChange={actions.setAssumptionDraft} onClose={actions.closeDialog} onSubmit={actions.createAssumption} open={state.activeDialog === "assumption"} />
       <ContextDialog busy={state.busy} draft={state.contextDraft} onChange={actions.setContextDraft} onClose={actions.closeDialog} onSubmit={actions.createContext} open={state.activeDialog === "context"} />
       <ContextItemDialog item={selectedContextItem} onClose={actions.closeDialog} onDownload={actions.downloadContext} onOpenLink={actions.openContextLink} open={state.activeDialog === "contextItem"} />
       <CompareDialog branches={strategyBranches} busy={state.busy} comparison={state.comparison} onBranchAChange={actions.setCompareBranchA} onBranchBChange={actions.setCompareBranchB} onClose={actions.closeDialog} onCompare={actions.runComparison} open={state.activeDialog === "compare"} selectedA={state.compareBranchA} selectedB={state.compareBranchB} />
       <CleanSolutionDialog busy={state.busy} onClose={actions.closeDialog} onCopy={actions.copyCleanSolution} onGenerate={actions.generateCleanSolution} onSave={actions.saveCleanSolution} open={state.activeDialog === "clean"} solution={state.cleanSolution} />
-      <ResultDialog branches={graph?.branches ?? []} busy={state.busy} draft={state.resultDraft} existingResult={draftResult} onChange={actions.setResultDraft} onClose={actions.closeDialog} onSubmit={actions.submitResult} open={state.activeDialog === "result"} strategies={graph?.strategies ?? []} />
+      <ResultDialog branches={graph?.branches ?? []} busy={state.busy} conflict={draftConflict} draft={state.resultDraft} existingResult={draftResult} onChange={actions.setResultDraft} onClose={actions.closeDialog} onSubmit={actions.submitResult} open={state.activeDialog === "result"} strategies={graph?.strategies ?? []} />
       <DecisionCheckpointDialog
         busy={state.busy}
         decision={selectedDecision}

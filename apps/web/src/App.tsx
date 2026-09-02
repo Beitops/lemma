@@ -1,11 +1,12 @@
 import { ArrowLeft, RefreshCw } from "lucide-react";
-import { type ReactNode, useMemo } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { Brand } from "./components/Brand";
 import { Button, LoadingScreen, ToastRegion } from "./components/Primitives";
 import { useAuth } from "./hooks/useAuth";
 import { useToasts } from "./hooks/useToasts";
 import { useWebMcp } from "./hooks/useWebMcp";
 import { LemmaApi } from "./lib/api";
+import { resolveCurrentTabWebMcpAgentName } from "./lib/webmcpAgentName";
 import type { WebMcpHighlight } from "./lib/webmcp";
 import { AuthPage } from "./pages/auth/AuthPage";
 import { DashboardPage } from "./pages/dashboard/DashboardPage";
@@ -70,6 +71,8 @@ export default function App() {
   const auth = useAuth();
   const navigation = useAppNavigation();
   const toasts = useToasts();
+  // Resolve once per mounted tab so React route changes retain its demo alias.
+  const [agentName] = useState(() => resolveCurrentTabWebMcpAgentName());
   const accessToken = auth.session?.access_token ?? null;
   const api = useMemo(() => new LemmaApi(() => accessToken), [accessToken]);
   const activeWorkspaceId = auth.session && navigation.page === "workspace"
@@ -91,7 +94,7 @@ export default function App() {
     pushToast: toasts.push,
   });
   const webMcpAvailable = useWebMcp({
-    agentName: "ChatGPT WebMCP",
+    agentName,
     api,
     highlight: (target) => workspace.highlightExternalMutation(mutationNotice(target)),
     refreshCurrentWorkspace: workspace.refreshFromAgent,
@@ -161,12 +164,14 @@ export default function App() {
       workspaceRoute = (
         <WorkspacePage
           actions={{ ...workspace.actions, goBack: navigation.goHome }}
+          draftConflict={workspace.draftConflict}
           expandedObjectiveIds={workspace.expandedObjectiveIds}
           graph={workspace.graph}
           loadingObjectiveIds={workspace.loadingObjectiveIds}
           objectiveStrategies={workspace.objectiveStrategies}
           overview={workspace.overview}
           pendingDecisions={workspace.pendingDecisions}
+          realtimeStatus={workspace.realtimeStatus}
           state={workspace.state}
           webMcpAvailable={webMcpAvailable}
         />

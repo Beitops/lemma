@@ -1,8 +1,22 @@
-import type { ContextItem, DecisionInboxItem, Objective, ObjectiveGraph, Workspace, WorkspaceOverview } from "@lemma/contracts";
+import type { ActivityEvent, ContextItem, DecisionInboxItem, Objective, ObjectiveGraph, Workspace, WorkspaceOverview } from "@lemma/contracts";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { LemmaApi } from "../../../lib/api";
+import type { WorkspaceRealtimeInvalidation } from "./useWorkspaceRealtime";
 import { useWorkspace } from "./useWorkspace";
+
+const realtimeHarness = vi.hoisted(() => ({
+  onInvalidate: null as ((invalidation: WorkspaceRealtimeInvalidation) => Promise<void> | void) | null,
+}));
+
+vi.mock("./useWorkspaceRealtime", () => ({
+  useWorkspaceRealtime: (options: {
+    onInvalidate: (invalidation: WorkspaceRealtimeInvalidation) => Promise<void> | void;
+  }) => {
+    realtimeHarness.onInvalidate = options.onInvalidate;
+    return { status: "live" as const };
+  },
+}));
 
 const WORKSPACE_ID = "10000000-0000-4000-8000-000000000001";
 const OBJECTIVE_A_ID = "20000000-0000-4000-8000-000000000001";
@@ -16,6 +30,37 @@ const BRANCH_B_RESULT_ID = "81000000-0000-4000-8000-000000000001";
 const CONTEXT_A_ID = "92000000-0000-4000-8000-000000000001";
 const CONTEXT_B_ID = "93000000-0000-4000-8000-000000000001";
 const TIMESTAMP = "2026-08-31T10:00:00.000Z";
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => undefined;
+  let reject: (reason?: unknown) => void = () => undefined;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+function activityEvent(
+  entityType: string,
+  objectiveId: string | null,
+  entityId: string,
+): ActivityEvent {
+  return {
+    actor_agent_name: "Remote agent",
+    actor_type: "agent",
+    actor_user_id: null,
+    created_at: TIMESTAMP,
+    details: {},
+    entity_id: entityId,
+    entity_revision: 2,
+    entity_type: entityType,
+    event_type: "update",
+    id: crypto.randomUUID(),
+    objective_id: objectiveId,
+    workspace_id: WORKSPACE_ID,
+  };
+}
 
 const workspace: Workspace = {
   created_at: TIMESTAMP,
@@ -236,6 +281,51 @@ describe("useWorkspace multi-objective state", () => {
     expect(options.onOpenObjective).toHaveBeenCalledWith(WORKSPACE_ID, OBJECTIVE_B_ID);
   });
 
+  it("does not let an older sidebar request overwrite a newer objective graph", async () => {
+    const { api, graphA, graphB } = createApi();
+    const options = hookOptions(api, OBJECTIVE_A_ID);
+    const { result, rerender } = renderHook(
+      ({ routeObjectiveId }: { routeObjectiveId: string }) => useWorkspace({
+        ...options,
+        objectiveId: routeObjectiveId,
+      }),
+      { initialProps: { routeObjectiveId: OBJECTIVE_A_ID } },
+    );
+    await waitFor(() => expect(result.current.graph?.objective.id).toBe(OBJECTIVE_A_ID));
+
+    const staleSidebar = deferred<Awaited<ReturnType<LemmaApi["listStrategies"]>>>();
+    const freshGraph = {
+      ...graphB,
+      strategies: graphB.strategies.map((strategy) => ({
+        ...strategy,
+        revision: 2,
+        title: "Fresh strategy from graph",
+      })),
+    };
+    vi.mocked(api.listStrategies).mockImplementationOnce(() => staleSidebar.promise);
+    vi.mocked(api.getObjectiveGraph).mockImplementation(
+      async (_workspaceId, nextObjectiveId) => nextObjectiveId === OBJECTIVE_B_ID ? freshGraph : graphA,
+    );
+
+    act(() => result.current.actions.toggleObjective(OBJECTIVE_B_ID));
+    await waitFor(() => expect(api.listStrategies).toHaveBeenCalledWith(WORKSPACE_ID, OBJECTIVE_B_ID, undefined));
+    rerender({ routeObjectiveId: OBJECTIVE_B_ID });
+    await waitFor(() => expect(result.current.graph?.strategies[0]?.title).toBe("Fresh strategy from graph"));
+
+    await act(async () => {
+      staleSidebar.resolve({
+        branches: graphB.branches,
+        objective_id: OBJECTIVE_B_ID,
+        strategies: graphB.strategies,
+        workspace_id: WORKSPACE_ID,
+      });
+      await staleSidebar.promise;
+    });
+
+    expect(result.current.objectiveStrategies[OBJECTIVE_B_ID]?.strategies[0]?.title)
+      .toBe("Fresh strategy from graph");
+  });
+
   it("opens the strategy dialog after navigating from another objective's add button", async () => {
     const { api } = createApi();
     const options = hookOptions(api, OBJECTIVE_A_ID);
@@ -418,6 +508,153 @@ describe("useWorkspace multi-objective state", () => {
     await waitFor(() => expect(api.getWorkspaceOverview).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(result.current.state.refreshing).toBe(false));
     expect(result.current.state.selectedStepId).toBe(step.id);
+  });
+
+  it("reconciles an active objective from a Realtime activity invalidation", async () => {
+    const { api, graphA } = createApi();
+    const options = hookOptions(api, OBJECTIVE_A_ID);
+    const { result } = renderHook(() => useWorkspace(options));
+    await waitFor(() => expect(result.current.graph?.objective.id).toBe(OBJECTIVE_A_ID));
+    const step = graphA.steps[0];
+    if (!step) throw new Error("Expected the fixture graph to include a step.");
+
+    vi.mocked(api.getWorkspaceOverview).mockClear();
+    vi.mocked(api.getObjectiveGraph).mockClear();
+    vi.mocked(api.listPendingDecisions).mockClear();
+    const invalidate = realtimeHarness.onInvalidate;
+    if (!invalidate) throw new Error("Expected the Realtime hook to register its invalidation callback.");
+
+    const realtimeSignal = new AbortController().signal;
+    await act(async () => invalidate({
+      activityEvents: [activityEvent("steps", OBJECTIVE_A_ID, step.id)],
+      reasons: [],
+      reconcile: false,
+      signal: realtimeSignal,
+    }));
+
+    expect(api.getWorkspaceOverview).toHaveBeenCalledOnce();
+    expect(api.getObjectiveGraph).toHaveBeenCalledWith(WORKSPACE_ID, OBJECTIVE_A_ID, realtimeSignal);
+    expect(api.listPendingDecisions).not.toHaveBeenCalled();
+    expect(options.onOpenObjective).not.toHaveBeenCalled();
+    expect(result.current.realtimeStatus).toBe("live");
+    expect(result.current.state.refreshing).toBe(false);
+  });
+
+  it("restores the active graph cache when a newer sidebar refresh fails", async () => {
+    const { api, graphA } = createApi();
+    const options = hookOptions(api, OBJECTIVE_A_ID);
+    const { result } = renderHook(() => useWorkspace(options));
+    await waitFor(() => expect(result.current.graph?.objective.id).toBe(OBJECTIVE_A_ID));
+
+    const graphRefresh = deferred<ObjectiveGraph>();
+    const sidebarRefresh = deferred<Awaited<ReturnType<LemmaApi["listStrategies"]>>>();
+    const freshGraph = {
+      ...graphA,
+      strategies: graphA.strategies.map((strategy) => ({
+        ...strategy,
+        revision: 2,
+        title: "Fresh active strategy",
+      })),
+    };
+    vi.mocked(api.getObjectiveGraph).mockImplementationOnce(() => graphRefresh.promise);
+    vi.mocked(api.listStrategies).mockImplementationOnce(() => sidebarRefresh.promise);
+
+    act(() => result.current.actions.refresh());
+    await waitFor(() => expect(api.getObjectiveGraph).toHaveBeenCalledTimes(2));
+    act(() => result.current.highlightExternalMutation({
+      objectiveId: OBJECTIVE_A_ID,
+      type: "objective",
+    }));
+    await waitFor(() => expect(api.listStrategies).toHaveBeenCalledOnce());
+
+    await act(async () => {
+      graphRefresh.resolve(freshGraph);
+      await graphRefresh.promise;
+    });
+    await waitFor(() => expect(result.current.graph?.strategies[0]?.title).toBe("Fresh active strategy"));
+
+    await act(async () => {
+      sidebarRefresh.reject(new Error("temporary sidebar failure"));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(result.current.objectiveStrategies[OBJECTIVE_A_ID]?.strategies[0]?.title)
+        .toBe("Fresh active strategy");
+    });
+  });
+
+  it("does not let an older overview request overwrite a newer Realtime-era snapshot", async () => {
+    const { api } = createApi();
+    const options = hookOptions(api, OBJECTIVE_A_ID);
+    const { result } = renderHook(() => useWorkspace(options));
+    await waitFor(() => expect(result.current.overview?.workspace.title).toBe("Shared workspace"));
+
+    const older = deferred<WorkspaceOverview>();
+    const newer = deferred<WorkspaceOverview>();
+    vi.mocked(api.getWorkspaceOverview)
+      .mockImplementationOnce(() => older.promise)
+      .mockImplementationOnce(() => newer.promise);
+
+    act(() => {
+      result.current.actions.refresh();
+      result.current.actions.refresh();
+    });
+    await act(async () => {
+      newer.resolve({
+        ...overview,
+        workspace: { ...workspace, revision: 3, title: "Newest workspace" },
+      });
+      await newer.promise;
+    });
+    await waitFor(() => expect(result.current.overview?.workspace.title).toBe("Newest workspace"));
+
+    await act(async () => {
+      older.resolve({
+        ...overview,
+        workspace: { ...workspace, revision: 2, title: "Older workspace" },
+      });
+      await older.promise;
+    });
+
+    expect(result.current.overview?.workspace.title).toBe("Newest workspace");
+    await waitFor(() => expect(result.current.state.refreshing).toBe(false));
+  });
+
+  it("keeps an open step draft stale after a remote revision instead of silently overwriting it", async () => {
+    const { api, graphA } = createApi();
+    const updateStep = vi.fn();
+    Object.assign(api, { updateStep });
+    const options = hookOptions(api, OBJECTIVE_A_ID);
+    const { result } = renderHook(() => useWorkspace(options));
+    await waitFor(() => expect(result.current.graph?.objective.id).toBe(OBJECTIVE_A_ID));
+    const step = graphA.steps[0];
+    if (!step) throw new Error("Expected the fixture graph to include a step.");
+
+    act(() => {
+      result.current.actions.openEditStep(step.id);
+      result.current.actions.setStepDraft("title", "My unsaved local title");
+    });
+    const refreshedGraph: ObjectiveGraph = {
+      ...graphA,
+      steps: graphA.steps.map((candidate) => candidate.id === step.id
+        ? { ...candidate, revision: 2, title: "Remote title" }
+        : candidate),
+    };
+    vi.mocked(api.getObjectiveGraph).mockResolvedValue(refreshedGraph);
+
+    act(() => result.current.actions.refresh());
+    await waitFor(() => expect(result.current.graph?.steps[0]?.revision).toBe(2));
+    await waitFor(() => expect(result.current.draftConflict).toContain("older graph revision"));
+    expect(result.current.state.stepDraft.title).toBe("My unsaved local title");
+
+    act(() => result.current.actions.submitStep());
+
+    expect(updateStep).not.toHaveBeenCalled();
+    expect(options.pushToast).toHaveBeenCalledWith(
+      expect.stringContaining("older graph revision"),
+      "error",
+    );
   });
 
   it("activates the objective before highlighting an agent-recorded branch outcome", async () => {

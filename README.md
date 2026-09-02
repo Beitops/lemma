@@ -13,7 +13,8 @@ Lemma is an IDE-like reasoning workspace where humans and AI agents work on the 
 - Structural branch comparison and clean-solution projection without deleting history.
 - Atomic branch/strategy completion plus editable successful, unsuccessful, or inconclusive results per strategy or branch.
 - Workspace-scoped hybrid step retrieval, optionally narrowed to one objective, backed by Postgres full-text search and pgvector.
-- Twenty-two top-level imperative WebMCP tools with shared Zod schemas, agent provenance, cancellation, safe cleanup, and immediate UI refresh/highlighting.
+- Authenticated Supabase Realtime invalidation with canonical API reconciliation, reconnect recovery, and a manual-refresh fallback.
+- Twenty-two top-level imperative WebMCP tools with shared Zod schemas, per-tab agent provenance, cancellation, safe cleanup, and immediate UI refresh/highlighting.
 
 ## Architecture
 
@@ -48,14 +49,24 @@ pnpm dev
 
 Fill `.env.local` with the browser-safe Supabase project URL and publishable key. `VITE_API_URL` is optional; by default the client derives `https://<project>.supabase.co/functions/v1/lemma-api/api/v1`. If this checkout still has the former `http://localhost:8787/api/v1` override, remove it or replace it with the Edge URL. The local web origin can be either `http://localhost:5173` or `http://127.0.0.1:5173`.
 
-To run the function against a local Supabase stack, use a second terminal:
+For a fully local stack, set `VITE_SUPABASE_URL=http://127.0.0.1:54321`, copy the publishable key reported by `supabase status` into `VITE_SUPABASE_PUBLISHABLE_KEY`, and set `VITE_API_URL=http://127.0.0.1:54321/functions/v1/lemma-api/api/v1`. Local Edge configuration lives separately so Vite never receives server-only variables:
+
+```bash
+cp supabase/functions/.env.example supabase/functions/.env
+```
+
+The local Edge runtime reaches Supabase through Docker's internal gateway, while browser access tokens name the public local Auth URL as their issuer. `LEMMA_AUTH_ISSUER` records that public issuer explicitly; hosted deployments normally omit it and derive the issuer from `SUPABASE_URL`.
+
+Then run the local stack and function in one terminal:
 
 ```bash
 supabase start
 pnpm edge:serve
 ```
 
-The function reads `SUPABASE_URL` and `SUPABASE_ANON_KEY` supplied by Supabase and a comma-separated `WEB_ORIGIN` allowlist. Its gateway JWT check is deliberately disabled in `supabase/config.toml`: the handler verifies every non-public Bearer token itself so authentication failures retain Lemma's stable JSON error envelope. Only `/api/v1/health` and CORS preflight are public.
+Run `pnpm dev` in another terminal.
+
+The function reads `SUPABASE_URL` and `SUPABASE_ANON_KEY` supplied by Supabase plus the comma-separated `WEB_ORIGIN` allowlist from `supabase/functions/.env`. Its gateway JWT check is deliberately disabled in `supabase/config.toml`: the handler verifies every non-public Bearer token itself so authentication failures retain Lemma's stable JSON error envelope. Only `/api/v1/health` and CORS preflight are public.
 
 Before deploying the web client, apply the database migrations and deploy the function:
 
@@ -123,6 +134,8 @@ generate_clean_solution
 Agents should call `get_skill` first in each new session. It returns trusted, versioned instructions for reading and changing Lemma's reasoning graph. Tool inputs are narrow JSON Schemas generated from the same Zod contracts used by the API. Mutations overwrite caller-provided authorship with agent provenance, validate server responses, forward invocation cancellation, refresh the shared graph after a commit, and use one `AbortController` to unregister cleanly.
 
 The Vite development server and Edge API emit `Origin-Agent-Cluster: ?1`, which current WebMCP discovery requires. A production web host must preserve that header, serve `index.html` as the fallback for client-side deep links, and support a browser with WebMCP enabled. Without WebMCP, the application remains fully usable in human mode.
+
+For the multi-agent demo, Realtime subscribes only to owner-authorized `activity_events` inserts for the open workspace. Notifications are validated and coalesced, then the UI refetches the canonical API snapshot instead of guessing which related rows changed. See [docs/realtime-sync.md](docs/realtime-sync.md) for the deployment check, failure behavior, and per-tab `?agent=` aliases.
 
 ## Security model
 

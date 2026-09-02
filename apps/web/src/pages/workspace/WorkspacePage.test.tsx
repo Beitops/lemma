@@ -217,6 +217,13 @@ afterEach(() => {
 });
 
 describe("WorkspacePage", () => {
+  it("surfaces the authenticated Realtime connection state while retaining manual refresh", () => {
+    renderPage({ realtimeStatus: "live" });
+
+    expect(screen.getByText("Live sync on")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh workspace" })).toBeInTheDocument();
+  });
+
   it("renders only the active objective graph while the sidebar still lists the other objectives", () => {
     renderPage();
 

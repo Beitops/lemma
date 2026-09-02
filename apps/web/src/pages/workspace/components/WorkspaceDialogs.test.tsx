@@ -154,4 +154,31 @@ describe("WorkspaceDialogs workspace component", () => {
     expect(strategySelect).toHaveTextContent("Invariant x^2 strategy");
     expect(strategySelect).not.toHaveTextContent("$");
   });
+
+  it("preserves a stale draft but disables saving until it is reopened", () => {
+    render(
+      <StepDialog
+        branchName={branch.name}
+        busy={false}
+        conflict="This draft is based on an older graph revision."
+        draft={{
+          body_markdown: "Unsaved local reasoning",
+          concepts: "",
+          status: "active",
+          summary: "",
+          theorem_tags: "",
+          title: "Unsaved local title",
+        }}
+        editing
+        onChange={vi.fn()}
+        onClose={vi.fn()}
+        onSubmit={vi.fn()}
+        open
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent("older graph revision");
+    expect(screen.getByRole("textbox", { name: "Step title" })).toHaveValue("Unsaved local title");
+    expect(screen.getByRole("button", { name: "Save revision" })).toBeDisabled();
+  });
 });

@@ -35,6 +35,8 @@ declare
   general_context uuid;
   context_a uuid;
   context_b uuid;
+  created_assumption_id uuid;
+  created_step_assumption_id uuid;
   specific_source_a uuid;
   general_source uuid;
   strategy_result_id uuid;
@@ -268,6 +270,105 @@ begin
     'test-create-step-b-000001'
   );
   step_b := (result ->> 'step_id')::uuid;
+
+  -- Assumption attachment carries the caller's view of the step revision into
+  -- the locked database mutation. A stale, independently idempotent request
+  -- must not create another assumption or relation.
+  result := public.mark_assumption(
+    p_step_id => step_a,
+    p_expected_step_revision => 1,
+    p_label => 'Non-zero denominator',
+    p_statement_markdown => '$x \neq 0$.',
+    p_idempotency_key => 'test-mark-assumption-001',
+    p_usage_kind => 'used',
+    p_assumption_status => 'proposed',
+    p_note_markdown => 'Required before division.',
+    p_author_type => 'agent',
+    p_author_agent_name => 'Assumption test agent'
+  );
+  created_assumption_id := (result ->> 'assumption_id')::uuid;
+  created_step_assumption_id := (result ->> 'step_assumption_id')::uuid;
+  if (result ->> 'step_revision')::bigint <> 2
+    or (result ->> 'branch_revision')::bigint <> 4
+    or not exists (
+      select 1
+      from public.assumptions as assumption
+      where assumption.id = created_assumption_id
+        and assumption.workspace_id = workspace_one
+        and assumption.author_type = 'agent'
+        and assumption.author_agent_name = 'Assumption test agent'
+    )
+    or not exists (
+      select 1
+      from public.step_assumptions as relation
+      where relation.id = created_step_assumption_id
+        and relation.step_id = step_a
+        and relation.assumption_id = created_assumption_id
+    ) then
+    raise exception 'revision-checked assumption mutation did not persist its relation';
+  end if;
+
+  retry_result := public.mark_assumption(
+    p_step_id => step_a,
+    p_expected_step_revision => 1,
+    p_label => 'A retry must not create another assumption',
+    p_statement_markdown => 'Ignored.',
+    p_idempotency_key => 'test-mark-assumption-001'
+  );
+  if retry_result <> result then
+    raise exception 'assumption receipt retry did not preserve the original result';
+  end if;
+
+  begin
+    perform public.mark_assumption(
+      p_step_id => step_a,
+      p_expected_step_revision => 1,
+      p_label => 'Stale assumption',
+      p_statement_markdown => 'This must not be attached.',
+      p_idempotency_key => 'test-mark-assumption-stale-001'
+    );
+    raise exception 'stale step revision was accepted for an assumption';
+  exception
+    when serialization_failure then null;
+  end;
+
+  if (select count(*) from public.assumptions where workspace_id = workspace_one) <> 1
+    or (select count(*) from public.step_assumptions where step_id = step_a) <> 1 then
+    raise exception 'stale assumption mutation changed graph state';
+  end if;
+
+  -- The deprecated signature remains executable only for a rolling Edge
+  -- deployment. Prove it delegates to the checked implementation and retains
+  -- the same idempotent receipt behavior before a later contract migration
+  -- removes it.
+  result := public.mark_assumption(
+    p_step_id => step_b,
+    p_label => 'Legacy rollout assumption',
+    p_statement_markdown => 'The compatibility wrapper delegates atomically.',
+    p_idempotency_key => 'test-mark-assumption-legacy-001',
+    p_author_type => 'agent',
+    p_author_agent_name => 'Legacy Edge test agent'
+  );
+  if (result ->> 'step_revision')::bigint <> 2
+    or (result ->> 'branch_revision')::bigint <> 3
+    or not exists (
+      select 1
+      from public.assumptions as assumption
+      where assumption.id = (result ->> 'assumption_id')::uuid
+        and assumption.author_agent_name = 'Legacy Edge test agent'
+    ) then
+    raise exception 'legacy assumption wrapper did not delegate to the checked mutation';
+  end if;
+
+  retry_result := public.mark_assumption(
+    p_step_id => step_b,
+    p_label => 'Ignored legacy retry',
+    p_statement_markdown => 'Ignored.',
+    p_idempotency_key => 'test-mark-assumption-legacy-001'
+  );
+  if retry_result <> result then
+    raise exception 'legacy assumption wrapper did not replay its original receipt';
+  end if;
 
   select revision into branch_a_revision from public.branches where id = root_a;
   select revision into branch_b_revision from public.branches where id = root_b;
@@ -1032,6 +1133,17 @@ begin
   if exists (select 1 from public.objectives where id = objective_a)
     or exists (select 1 from public.reasoning_results where id in (strategy_result_id, branch_result_id)) then
     raise exception 'RLS exposed another owner objective data';
+  end if;
+
+  -- Postgres Changes applies this same SELECT policy before delivering an
+  -- activity_events INSERT, so prove that the second user cannot observe the
+  -- invalidation stream for either workspace owned by the first user.
+  if exists (
+    select 1
+    from public.activity_events as event
+    where event.workspace_id in (workspace_one, workspace_two)
+  ) then
+    raise exception 'RLS exposed another owner activity events';
   end if;
 
   begin

@@ -1673,7 +1673,7 @@ export const webMcpToolRegistry = {
   mark_assumption: toolSchema(
     "mark_assumption",
     "Mark assumption",
-    "Create a first-class assumption and attach it to a step. This mutation is idempotent for the supplied idempotency_key.",
+    "Create a first-class assumption and attach it to a step only when expected_step_revision is current. This mutation is idempotent for the supplied idempotency_key.",
     markAssumptionInputSchema,
     markAssumptionResultSchema,
     false,

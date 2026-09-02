@@ -3,7 +3,7 @@
 begin;
 set local search_path = public, extensions;
 
-select plan(84);
+select plan(88);
 
 select has_extension('vector', 'pgvector is installed');
 select has_extension('pgtap', 'pgTAP is installed');
@@ -194,6 +194,52 @@ select ok(
       and is_nullable = 'YES'
   ),
   'activity events can carry objective scope'
+);
+
+select ok(
+  exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'activity_events'
+  ),
+  'activity events are published as the bounded Realtime invalidation stream'
+);
+select ok(
+  to_regprocedure(
+    'public.mark_assumption(uuid,bigint,text,text,text,text,text,text,text,text)'
+  ) is not null,
+  'mark_assumption exposes the revision-checked signature'
+);
+select ok(
+  to_regprocedure(
+    'public.mark_assumption(uuid,text,text,text,text,text,text,text,text)'
+  ) is not null,
+  'the deprecated mark_assumption wrapper remains available for a safe Edge rollout'
+);
+select ok(
+  has_function_privilege(
+    'authenticated',
+    'public.mark_assumption(uuid,bigint,text,text,text,text,text,text,text,text)',
+    'execute'
+  )
+  and not has_function_privilege(
+    'anon',
+    'public.mark_assumption(uuid,bigint,text,text,text,text,text,text,text,text)',
+    'execute'
+  )
+  and has_function_privilege(
+    'authenticated',
+    'public.mark_assumption(uuid,text,text,text,text,text,text,text,text)',
+    'execute'
+  )
+  and not has_function_privilege(
+    'anon',
+    'public.mark_assumption(uuid,text,text,text,text,text,text,text,text)',
+    'execute'
+  ),
+  'only authenticated callers can execute either assumption mutation signature'
 );
 
 select ok((select relrowsecurity from pg_class where oid = 'public.objectives'::regclass), 'objectives has RLS');

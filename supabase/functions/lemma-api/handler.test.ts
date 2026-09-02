@@ -11,6 +11,7 @@ import {
 import { it } from "vitest";
 
 const environment: LemmaApiEnvironment = {
+  AUTH_ISSUER: "https://example.supabase.co/auth/v1",
   SUPABASE_PUBLISHABLE_KEY: "sb_publishable_test_key",
   SUPABASE_URL: "https://example.supabase.co",
   WEB_ORIGIN: ["http://localhost:5173"],
@@ -413,7 +414,7 @@ it("accepts the Edge runtime anon key when no publishable key is configured", ()
   const loaded = loadLemmaApiEnvironment({
     SUPABASE_ANON_KEY: "sb_anon_test_key",
     SUPABASE_PUBLISHABLE_KEY: "",
-    SUPABASE_URL: "https://example.supabase.co",
+    SUPABASE_URL: "https://example.supabase.co/",
   });
 
   assertEqual(
@@ -426,6 +427,76 @@ it("accepts the Edge runtime anon key when no publishable key is configured", ()
       loaded.WEB_ORIGIN.includes("http://127.0.0.1:5173"),
     "the default CORS allowlist must support both local Vite origins",
   );
+  assertEqual(
+    loaded.AUTH_ISSUER,
+    "https://example.supabase.co/auth/v1",
+    "the auth issuer defaults to the public project URL",
+  );
+  assertEqual(
+    loaded.SUPABASE_URL,
+    "https://example.supabase.co",
+    "the project URL is normalized before deriving the auth issuer",
+  );
+});
+
+it("accepts a public auth issuer distinct from the internal Supabase URL", async () => {
+  const loaded = loadLemmaApiEnvironment({
+    LEMMA_AUTH_ISSUER: "http://127.0.0.1:54321/auth/v1",
+    SUPABASE_PUBLISHABLE_KEY: "sb_publishable_test_key",
+    SUPABASE_URL: "http://kong:8000",
+  });
+  const fakeFactory = (() => ({
+    auth: {
+      getClaims: async () => ({
+        data: {
+          claims: {
+            aud: "authenticated",
+            iss: "http://127.0.0.1:54321/auth/v1",
+            role: "authenticated",
+            sub: userId,
+          },
+        },
+        error: null,
+      }),
+    },
+  })) as never;
+
+  const authenticated = await createSupabaseAuthenticator(loaded, fakeFactory)("test-token");
+
+  assertEqual(authenticated.id, userId, "the configured public issuer is accepted");
+});
+
+it("rejects signed claims from an issuer other than the configured public issuer", async () => {
+  let factoryCalls = 0;
+  const fakeFactory = (() => {
+    factoryCalls += 1;
+    return {
+      auth: {
+        getClaims: async () => ({
+          data: {
+            claims: {
+              aud: "authenticated",
+              iss: "http://unexpected.example/auth/v1",
+              role: "authenticated",
+              sub: userId,
+            },
+          },
+          error: null,
+        }),
+      },
+    };
+  }) as never;
+
+  let thrown: unknown;
+  try {
+    await createSupabaseAuthenticator(environment, fakeFactory)("test-token");
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert(thrown instanceof ApiError, "an issuer mismatch must reject the access token");
+  assertEqual(thrown.code, "UNAUTHORIZED", "issuer mismatch error code");
+  assertEqual(factoryCalls, 1, "an RLS data client is not created for mismatched claims");
 });
 
 it("serves objective shell, graph, scoped context, and objective mutations through v1 routes", async () => {
@@ -702,6 +773,100 @@ it("maps a decision resolution to the human-only typed RPC signature", async () 
     }),
     "resolution RPC has only the typed five-argument payload",
   );
+});
+
+it("maps assumption revisions to the atomic mark-assumption RPC", async () => {
+  const calls: Array<{ arguments_: Record<string, unknown>; functionName: string }> = [];
+  const service = new SupabaseGraphService({
+    rpc: async (functionName: string, arguments_: Record<string, unknown>) => {
+      calls.push({ arguments_, functionName });
+      return {
+        data: {
+          assumption_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          branch_revision: 4,
+          step_assumption_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          step_id: sourceStepId,
+          step_revision: 2,
+        },
+        error: null,
+      };
+    },
+  } as unknown as AuthenticatedUser["supabase"]);
+
+  await service.markAssumption({
+    author_agent_name: "Assumption Agent",
+    author_type: "agent",
+    expected_step_revision: 1,
+    idempotency_key: "assumption-create-001",
+    label: "Non-zero denominator",
+    note_markdown: "Required before division.",
+    statement_markdown: "$x \\neq 0$.",
+    step_id: sourceStepId,
+    usage_kind: "used",
+  });
+
+  assertEqual(calls[0]?.functionName, "mark_assumption", "assumption RPC name");
+  assertEqual(
+    JSON.stringify(calls[0]?.arguments_),
+    JSON.stringify({
+      p_assumption_status: undefined,
+      p_expected_step_revision: 1,
+      p_idempotency_key: "assumption-create-001",
+      p_label: "Non-zero denominator",
+      p_note_markdown: "Required before division.",
+      p_statement_markdown: "$x \\neq 0$.",
+      p_step_id: sourceStepId,
+      p_usage_kind: "used",
+      p_author_type: "agent",
+      p_author_agent_name: "Assumption Agent",
+    }),
+    "assumption RPC receives the caller revision in its single atomic request",
+  );
+});
+
+it("requires an assumption revision before the mutation service is called", async () => {
+  let received: Record<string, unknown> | undefined;
+  const api = handler(graphService({
+    markAssumption: async (input) => {
+      received = input;
+      return {
+        assumption_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        branch_revision: 4,
+        step_assumption_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        step_id: sourceStepId,
+        step_revision: 2,
+      };
+    },
+  }));
+  const headers = { Authorization: "Bearer test-token", "Content-Type": "application/json" };
+
+  const missingRevision = await api(request(`/api/v1/steps/${sourceStepId}/assumptions`, {
+    body: JSON.stringify({
+      author_type: "human",
+      idempotency_key: "assumption-create-002",
+      label: "Non-zero denominator",
+      statement_markdown: "$x \\neq 0$.",
+    }),
+    headers,
+    method: "POST",
+  }));
+  assertEqual(missingRevision.status, 400, "missing assumption revision is rejected");
+  assertEqual(received, undefined, "invalid assumption does not reach the graph service");
+
+  const created = await api(request(`/api/v1/steps/${sourceStepId}/assumptions`, {
+    body: JSON.stringify({
+      author_type: "human",
+      expected_step_revision: 1,
+      idempotency_key: "assumption-create-003",
+      label: "Non-zero denominator",
+      statement_markdown: "$x \\neq 0$.",
+    }),
+    headers,
+    method: "POST",
+  }));
+  assertEqual(created.status, 201, "assumption creation status");
+  assertEqual(received?.expected_step_revision, 1, "route forwards required step revision");
+  assertEqual(received?.step_id, sourceStepId, "route owns the target step identifier");
 });
 
 it("maps ordered agent-authored step dependencies to the create-step RPC", async () => {

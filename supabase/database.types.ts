@@ -1279,6 +1279,7 @@ export type Database = {
           p_assumption_status?: string
           p_author_agent_name?: string
           p_author_type?: string
+          p_expected_step_revision: number
           p_idempotency_key: string
           p_label: string
           p_note_markdown?: string

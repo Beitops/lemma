@@ -139,6 +139,7 @@ type ValidationIssue = {
 };
 
 export type LemmaApiEnvironment = {
+  AUTH_ISSUER: string;
   SUPABASE_PUBLISHABLE_KEY: string;
   SUPABASE_URL: string;
   WEB_ORIGIN: string[];
@@ -410,7 +411,7 @@ export function createSupabaseAuthenticator(
   const verifier = clientFactory(environment.SUPABASE_URL, environment.SUPABASE_PUBLISHABLE_KEY, {
     auth: AUTH_CLIENT_OPTIONS,
   });
-  const expectedIssuer = `${environment.SUPABASE_URL}/auth/v1`;
+  const expectedIssuer = environment.AUTH_ISSUER;
 
   return async (accessToken) => {
     let result: Awaited<ReturnType<typeof verifier.auth.getClaims>>;
@@ -1000,12 +1001,10 @@ export class SupabaseGraphService implements GraphService {
     return setReasoningResultResultSchema.parse(result);
   }
 
-  public async markAssumption(input: RecordInput): Promise<unknown> {
-    const step = await this.stepRow(requiredString(input, "step_id"));
-    this.checkOptionalRevision(step, input, "expected_step_revision");
-
+  public markAssumption(input: RecordInput): Promise<unknown> {
     return this.rpc("mark_assumption", {
       p_assumption_status: optional(stringValue(input, "assumption_status")),
+      p_expected_step_revision: requiredNumber(input, "expected_step_revision"),
       p_idempotency_key: requiredString(input, "idempotency_key"),
       p_label: requiredString(input, "label"),
       p_note_markdown: optional(stringValue(input, "note_markdown")),
@@ -1203,15 +1202,6 @@ export class SupabaseGraphService implements GraphService {
     );
   }
 
-  private async stepRow(stepId: string): Promise<RecordInput> {
-    const result = await this.supabase.from("steps").select("*").eq("id", stepId).maybeSingle();
-    const step = responseOrThrow(result);
-    if (!step) {
-      throw notFound("Step");
-    }
-    return step as RecordInput;
-  }
-
   private async branchRow(branchId: string): Promise<RecordInput> {
     const result = await this.supabase
       .from("branches")
@@ -1225,28 +1215,6 @@ export class SupabaseGraphService implements GraphService {
     return branch as RecordInput;
   }
 
-  private rowRevision(row: RecordInput): number {
-    const revision = row.revision;
-    if (typeof revision !== "number") {
-      throw new ApiError("INTERNAL_ERROR", "The resource has an invalid revision.", 500);
-    }
-    return revision;
-  }
-
-  private checkOptionalRevision(row: RecordInput, input: RecordInput, field: string): void {
-    const expected = numberValue(input, field);
-    if (expected !== undefined && this.rowRevision(row) !== expected) {
-      throw this.revisionConflict();
-    }
-  }
-
-  private revisionConflict(): ApiError {
-    return new ApiError(
-      "REVISION_CONFLICT",
-      "This item changed before your update could be applied. Refresh and try again.",
-      409,
-    );
-  }
 }
 
 function validationIssues(issues: ValidationIssue[] | undefined): ApiErrorPayload["details"] {
@@ -1423,6 +1391,7 @@ function normalizeEnvironment(environment: LemmaApiEnvironment): LemmaApiEnviron
   }
 
   return {
+    AUTH_ISSUER: normalizeUrl(environment.AUTH_ISSUER, "AUTH_ISSUER"),
     SUPABASE_PUBLISHABLE_KEY: environment.SUPABASE_PUBLISHABLE_KEY.trim(),
     SUPABASE_URL: normalizeUrl(environment.SUPABASE_URL, "SUPABASE_URL"),
     WEB_ORIGIN: normalizeOrigins(environment.WEB_ORIGIN),
@@ -1438,10 +1407,12 @@ export function loadLemmaApiEnvironment(source: EnvironmentSource): LemmaApiEnvi
       "SUPABASE_URL and either SUPABASE_ANON_KEY or SUPABASE_PUBLISHABLE_KEY are required.",
     );
   }
+  const normalizedSupabaseUrl = normalizeUrl(url, "SUPABASE_URL");
 
   return normalizeEnvironment({
+    AUTH_ISSUER: source.LEMMA_AUTH_ISSUER?.trim() || `${normalizedSupabaseUrl}/auth/v1`,
     SUPABASE_PUBLISHABLE_KEY: publishableKey,
-    SUPABASE_URL: url,
+    SUPABASE_URL: normalizedSupabaseUrl,
     WEB_ORIGIN: normalizeOrigins(source.WEB_ORIGIN),
   });
 }

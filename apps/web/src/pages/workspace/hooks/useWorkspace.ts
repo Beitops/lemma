@@ -21,6 +21,11 @@ import type { ObjectiveStrategyGroup } from "../components/WorkspaceSidebar";
 import type { ToastTone } from "../../../components/Primitives";
 import { ApiClientError, type LemmaApi } from "../../../lib/api";
 import { markdownToPlainText } from "../../../lib/markdownToPlainText";
+import {
+  useWorkspaceRealtime,
+  type WorkspaceRealtimeInvalidation,
+  type WorkspaceRealtimeStatus,
+} from "./useWorkspaceRealtime";
 
 const EMPTY_STRATEGY: StrategyDraft = {
   description_markdown: "",
@@ -141,6 +146,77 @@ interface WorkspaceSelection {
   selectedStrategyId: string;
 }
 
+type RevisionEditSession =
+  | { entityId: string; kind: "assumption" | "step"; revision: number }
+  | { entityId: string; kind: "new-step"; revision: number }
+  | { entityId: string; kind: "objective"; revision: number }
+  | {
+      kind: "result";
+      resultRevision: number | null;
+      targetId: string;
+      targetRevision: number;
+      targetType: "branch" | "strategy";
+    };
+
+const STALE_DRAFT_MESSAGE = "This draft is based on an older graph revision. Close it and reopen the latest version before saving.";
+
+function resultEditSession(
+  graph: ObjectiveGraph,
+  targetType: "branch" | "strategy",
+  targetId: string,
+): RevisionEditSession | null {
+  const target = targetType === "branch"
+    ? graph.branches.find((branch) => branch.id === targetId)
+    : graph.strategies.find((strategy) => strategy.id === targetId);
+  if (!target) return null;
+  const result = graph.reasoning_results.find(
+    (candidate) => candidate.target_type === targetType && candidate.target_id === targetId,
+  );
+  return {
+    kind: "result",
+    resultRevision: result?.revision ?? null,
+    targetId,
+    targetRevision: target.revision,
+    targetType,
+  };
+}
+
+function revisionEditConflict(
+  graph: ObjectiveGraph | null,
+  session: RevisionEditSession | null,
+): string | null {
+  if (!graph || !session) return null;
+
+  if (session.kind === "objective") {
+    return graph.objective.id === session.entityId && graph.objective.revision === session.revision
+      ? null
+      : STALE_DRAFT_MESSAGE;
+  }
+  if (session.kind === "new-step") {
+    const branch = graph.branches.find((candidate) => candidate.id === session.entityId);
+    return branch?.revision === session.revision ? null : STALE_DRAFT_MESSAGE;
+  }
+  if (session.kind === "step" || session.kind === "assumption") {
+    const step = graph.steps.find((candidate) => candidate.id === session.entityId);
+    return step?.revision === session.revision ? null : STALE_DRAFT_MESSAGE;
+  }
+
+  if (session.kind === "result") {
+    const target = session.targetType === "branch"
+      ? graph.branches.find((branch) => branch.id === session.targetId)
+      : graph.strategies.find((strategy) => strategy.id === session.targetId);
+    const result = graph.reasoning_results.find(
+      (candidate) => candidate.target_type === session.targetType && candidate.target_id === session.targetId,
+    );
+    return target?.revision === session.targetRevision
+      && (result?.revision ?? null) === session.resultRevision
+      ? null
+      : STALE_DRAFT_MESSAGE;
+  }
+
+  return STALE_DRAFT_MESSAGE;
+}
+
 function resolveBranchSelection(
   graph: ObjectiveGraph | null,
   branchId: string,
@@ -224,6 +300,7 @@ function objectiveForRoute(overview: WorkspaceOverview, objectiveId: string | nu
 
 export interface WorkspaceController {
   actions: WorkspacePageActions;
+  draftConflict: string | null;
   error: string | null;
   expandedObjectiveIds: string[];
   graph: ObjectiveGraph | null;
@@ -233,6 +310,7 @@ export interface WorkspaceController {
   objectiveStrategies: Record<string, ObjectiveStrategyGroup | undefined>;
   overview: WorkspaceOverview | null;
   pendingDecisions: DecisionInboxItem[];
+  realtimeStatus: WorkspaceRealtimeStatus;
   refreshFromAgent: (signal: AbortSignal) => Promise<void>;
   state: WorkspacePageState;
 }
@@ -326,11 +404,18 @@ export function useWorkspace({
   const [expandedObjectiveIds, setExpandedObjectiveIds] = useState<string[]>([]);
   const [objectiveStrategies, setObjectiveStrategies] = useState<Record<string, ObjectiveStrategyGroup | undefined>>({});
   const [pendingDecisions, setPendingDecisions] = useState<DecisionInboxItem[]>([]);
+  const [draftConflict, setDraftConflict] = useState<string | null>(null);
   const graphRef = useRef<ObjectiveGraph | null>(null);
   const overviewRef = useRef<WorkspaceOverview | null>(null);
   const pendingDecisionsRef = useRef<DecisionInboxItem[]>([]);
   const workspaceIdRef = useRef<string | null>(workspaceId);
+  const overviewLoadVersionRef = useRef(0);
+  const pendingDecisionLoadVersionRef = useRef(0);
   const objectiveLoadVersionRef = useRef(0);
+  const objectiveStrategyLoadVersionsRef = useRef(new Map<string, number>());
+  const objectiveLoadingCountsRef = useRef(new Map<string, number>());
+  const refreshingOperationsRef = useRef(new Set<symbol>());
+  const revisionEditSessionRef = useRef<RevisionEditSession | null>(null);
   const pendingStrategyDialogObjectiveIdRef = useRef<string | null>(null);
   const pendingStrategyIdRef = useRef<string | null>(null);
   const pendingDecisionFocusRef = useRef<string | null>(null);
@@ -341,10 +426,28 @@ export function useWorkspace({
     workspaceIdRef.current = workspaceId;
   }, [workspaceId]);
 
+  const beginRefreshing = useCallback(() => {
+    const operation = Symbol("workspace-refresh");
+    refreshingOperationsRef.current.add(operation);
+    setState((current) => current.refreshing ? current : { ...current, refreshing: true });
+    return operation;
+  }, []);
+
+  const endRefreshing = useCallback((operation: symbol) => {
+    refreshingOperationsRef.current.delete(operation);
+    if (refreshingOperationsRef.current.size === 0) {
+      setState((current) => current.refreshing ? { ...current, refreshing: false } : current);
+    }
+  }, []);
+
   const fetchOverview = useCallback(async (signal?: AbortSignal) => {
     if (!workspaceId) return null;
+    const loadVersion = ++overviewLoadVersionRef.current;
     const nextOverview = await api.getWorkspaceOverview(workspaceId, signal);
-    if (workspaceIdRef.current !== workspaceId) return null;
+    if (
+      workspaceIdRef.current !== workspaceId
+      || loadVersion !== overviewLoadVersionRef.current
+    ) return null;
     overviewRef.current = nextOverview;
     setOverview(nextOverview);
     setError(null);
@@ -353,8 +456,12 @@ export function useWorkspace({
 
   const fetchPendingDecisions = useCallback(async (signal?: AbortSignal) => {
     if (!workspaceId) return [];
+    const loadVersion = ++pendingDecisionLoadVersionRef.current;
     const result = await api.listPendingDecisions(workspaceId, signal);
-    if (workspaceIdRef.current !== workspaceId) return [];
+    if (
+      workspaceIdRef.current !== workspaceId
+      || loadVersion !== pendingDecisionLoadVersionRef.current
+    ) return [];
     const decisions = result.decisions;
     pendingDecisionsRef.current = decisions;
     setPendingDecisions(decisions);
@@ -364,38 +471,76 @@ export function useWorkspace({
   const fetchObjectiveGraph = useCallback(async (nextObjectiveId: string, signal?: AbortSignal) => {
     if (!workspaceId) return null;
     const loadVersion = ++objectiveLoadVersionRef.current;
+    const previousStrategyCacheVersion = objectiveStrategyLoadVersionsRef.current.get(nextObjectiveId) ?? 0;
+    const strategyCacheVersion = previousStrategyCacheVersion + 1;
+    objectiveStrategyLoadVersionsRef.current.set(nextObjectiveId, strategyCacheVersion);
+    const releaseStrategyCacheVersion = () => {
+      if (objectiveStrategyLoadVersionsRef.current.get(nextObjectiveId) === strategyCacheVersion) {
+        objectiveStrategyLoadVersionsRef.current.set(nextObjectiveId, previousStrategyCacheVersion);
+      }
+    };
+    objectiveLoadingCountsRef.current.set(
+      nextObjectiveId,
+      (objectiveLoadingCountsRef.current.get(nextObjectiveId) ?? 0) + 1,
+    );
     setLoadingObjectiveIds((current) => current.includes(nextObjectiveId) ? current : [...current, nextObjectiveId]);
     try {
       const nextGraph = await api.getObjectiveGraph(workspaceId, nextObjectiveId, signal);
-      if (workspaceIdRef.current !== workspaceId || loadVersion !== objectiveLoadVersionRef.current) return null;
+      if (workspaceIdRef.current !== workspaceId || loadVersion !== objectiveLoadVersionRef.current) {
+        releaseStrategyCacheVersion();
+        return null;
+      }
       graphRef.current = nextGraph;
       setGraph(nextGraph);
-      setObjectiveStrategies((current) => ({
-        ...current,
-        [nextObjectiveId]: {
-          branches: nextGraph.branches,
-          strategies: nextGraph.strategies,
-        },
-      }));
+      if (objectiveStrategyLoadVersionsRef.current.get(nextObjectiveId) === strategyCacheVersion) {
+        setObjectiveStrategies((current) => ({
+          ...current,
+          [nextObjectiveId]: {
+            branches: nextGraph.branches,
+            strategies: nextGraph.strategies,
+          },
+        }));
+      }
       setError(null);
       return nextGraph;
+    } catch (loadError) {
+      releaseStrategyCacheVersion();
+      throw loadError;
     } finally {
       if (workspaceIdRef.current === workspaceId) {
-        setLoadingObjectiveIds((current) => current.filter((item) => item !== nextObjectiveId));
+        const remaining = Math.max(
+          0,
+          (objectiveLoadingCountsRef.current.get(nextObjectiveId) ?? 1) - 1,
+        );
+        if (remaining > 0) objectiveLoadingCountsRef.current.set(nextObjectiveId, remaining);
+        else {
+          objectiveLoadingCountsRef.current.delete(nextObjectiveId);
+          setLoadingObjectiveIds((current) => current.filter((item) => item !== nextObjectiveId));
+        }
       }
     }
   }, [api, workspaceId]);
 
   const fetchObjectiveStrategies = useCallback(async (
     nextObjectiveId: string,
-    options: { force?: boolean; signal?: AbortSignal } = {},
+    options: { force?: boolean; signal?: AbortSignal; silent?: boolean } = {},
   ) => {
-    const { force = false, signal } = options;
+    const { force = false, signal, silent = false } = options;
     if (!workspaceId || (!force && objectiveStrategies[nextObjectiveId])) return;
+    const previousLoadVersion = objectiveStrategyLoadVersionsRef.current.get(nextObjectiveId) ?? 0;
+    const loadVersion = previousLoadVersion + 1;
+    objectiveStrategyLoadVersionsRef.current.set(nextObjectiveId, loadVersion);
+    objectiveLoadingCountsRef.current.set(
+      nextObjectiveId,
+      (objectiveLoadingCountsRef.current.get(nextObjectiveId) ?? 0) + 1,
+    );
     setLoadingObjectiveIds((current) => current.includes(nextObjectiveId) ? current : [...current, nextObjectiveId]);
     try {
       const result = await api.listStrategies(workspaceId, nextObjectiveId, signal);
-      if (workspaceIdRef.current !== workspaceId) return;
+      if (
+        workspaceIdRef.current !== workspaceId
+        || objectiveStrategyLoadVersionsRef.current.get(nextObjectiveId) !== loadVersion
+      ) return;
       setObjectiveStrategies((current) => ({
         ...current,
         [nextObjectiveId]: {
@@ -404,18 +549,46 @@ export function useWorkspace({
         },
       }));
     } catch (loadError) {
+      if (objectiveStrategyLoadVersionsRef.current.get(nextObjectiveId) === loadVersion) {
+        objectiveStrategyLoadVersionsRef.current.set(nextObjectiveId, previousLoadVersion);
+        const currentGraph = graphRef.current;
+        if (currentGraph?.objective.id === nextObjectiveId) {
+          setObjectiveStrategies((current) => ({
+            ...current,
+            [nextObjectiveId]: {
+              branches: currentGraph.branches,
+              strategies: currentGraph.strategies,
+            },
+          }));
+        }
+      }
+      if (silent) throw loadError;
       if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
         pushToast(readableError(loadError), "error");
       }
     } finally {
       if (workspaceIdRef.current === workspaceId) {
-        setLoadingObjectiveIds((current) => current.filter((item) => item !== nextObjectiveId));
+        const remaining = Math.max(
+          0,
+          (objectiveLoadingCountsRef.current.get(nextObjectiveId) ?? 1) - 1,
+        );
+        if (remaining > 0) objectiveLoadingCountsRef.current.set(nextObjectiveId, remaining);
+        else {
+          objectiveLoadingCountsRef.current.delete(nextObjectiveId);
+          setLoadingObjectiveIds((current) => current.filter((item) => item !== nextObjectiveId));
+        }
       }
     }
   }, [api, objectiveStrategies, pushToast, workspaceId]);
 
   useEffect(() => {
+    overviewLoadVersionRef.current += 1;
+    pendingDecisionLoadVersionRef.current += 1;
     objectiveLoadVersionRef.current += 1;
+    objectiveStrategyLoadVersionsRef.current.clear();
+    objectiveLoadingCountsRef.current.clear();
+    refreshingOperationsRef.current.clear();
+    revisionEditSessionRef.current = null;
     graphRef.current = null;
     overviewRef.current = null;
     pendingStrategyDialogObjectiveIdRef.current = null;
@@ -426,6 +599,7 @@ export function useWorkspace({
     setGraph(null);
     setOverview(null);
     setError(null);
+    setDraftConflict(null);
     setState(initialPageState());
     setExpandedObjectiveIds([]);
     setObjectiveStrategies({});
@@ -478,6 +652,8 @@ export function useWorkspace({
 
   useEffect(() => {
     if (!objectiveId) return;
+    revisionEditSessionRef.current = null;
+    setDraftConflict(null);
     setState((current) => ({
       ...current,
       activeDialog: null,
@@ -494,6 +670,10 @@ export function useWorkspace({
       targetStepId: null,
     }));
   }, [objectiveId]);
+
+  useEffect(() => {
+    setDraftConflict(revisionEditConflict(graph, revisionEditSessionRef.current));
+  }, [graph]);
 
   useEffect(() => {
     if (!graph) return;
@@ -625,7 +805,7 @@ export function useWorkspace({
 
   const refresh = useCallback(() => {
     if (!workspaceId) return;
-    setState((current) => ({ ...current, refreshing: true }));
+    const refreshOperation = beginRefreshing();
     void (async () => {
       const [refreshedOverview] = await Promise.all([fetchOverview(), fetchPendingDecisions()]);
       const nextObjective = refreshedOverview ? objectiveForRoute(refreshedOverview, objectiveId) : null;
@@ -636,10 +816,12 @@ export function useWorkspace({
         setError(message);
         pushToast(message, "error");
       })
-      .finally(() => setState((current) => ({ ...current, refreshing: false })));
-  }, [fetchObjectiveGraph, fetchOverview, fetchPendingDecisions, objectiveId, pushToast, workspaceId]);
+      .finally(() => endRefreshing(refreshOperation));
+  }, [beginRefreshing, endRefreshing, fetchObjectiveGraph, fetchOverview, fetchPendingDecisions, objectiveId, pushToast, workspaceId]);
 
   const closeDialog = useCallback(() => {
+    revisionEditSessionRef.current = null;
+    setDraftConflict(null);
     setState((current) => ({
       ...current,
       activeDialog: null,
@@ -653,6 +835,11 @@ export function useWorkspace({
       targetStepId: null,
     }));
   }, []);
+
+  const rejectStaleDraft = useCallback(() => {
+    setDraftConflict(STALE_DRAFT_MESSAGE);
+    pushToast(STALE_DRAFT_MESSAGE, "error");
+  }, [pushToast]);
 
   const refreshAfterMutation = useCallback(async (targetObjectiveId: string | null) => {
     await Promise.all([fetchOverview(), fetchPendingDecisions()]);
@@ -673,6 +860,8 @@ export function useWorkspace({
         const result = await operation();
         await refreshAfterMutation(targetObjectiveId);
         after?.(result);
+        revisionEditSessionRef.current = null;
+        setDraftConflict(null);
         setState((current) => ({
           ...current,
           activeDialog: null,
@@ -689,6 +878,7 @@ export function useWorkspace({
         setState((current) => ({ ...current, busy: false }));
         pushToast(message, "error");
         if (mutationError instanceof ApiClientError && mutationError.code === "REVISION_CONFLICT") {
+          setDraftConflict(STALE_DRAFT_MESSAGE);
           void refreshAfterMutation(targetObjectiveId).catch(() => undefined);
         }
       }
@@ -731,12 +921,21 @@ export function useWorkspace({
       pushToast("Select the objective you want to edit.", "error");
       return;
     }
+    const editSession = revisionEditSessionRef.current;
+    if (
+      editSession?.kind !== "objective"
+      || editSession.entityId !== editingObjectiveId
+      || editSession.revision !== activeGraph.objective.revision
+    ) {
+      rejectStaleDraft();
+      return;
+    }
     const draft = state.objectiveDraft;
     void runMutation(
       () => api.updateObjective(workspaceId, editingObjectiveId, {
         author_type: "human",
         constraints_markdown: draft.constraints_markdown.trim(),
-        expected_revision: activeGraph.objective.revision,
+        expected_revision: editSession.revision,
         idempotency_key: crypto.randomUUID(),
         objective_markdown: draft.objective_markdown.trim(),
         title: draft.title.trim(),
@@ -745,7 +944,7 @@ export function useWorkspace({
       activeGraph.objective.id,
       () => setState((current) => ({ ...current, objectiveDraft: EMPTY_OBJECTIVE })),
     );
-  }, [api, pushToast, runMutation, state.editingObjectiveId, state.objectiveDraft, workspaceId]);
+  }, [api, pushToast, rejectStaleDraft, runMutation, state.editingObjectiveId, state.objectiveDraft, workspaceId]);
 
   const createStrategy = useCallback(() => {
     const activeGraph = graphRef.current;
@@ -784,6 +983,15 @@ export function useWorkspace({
       pushToast("A completed or dead-end branch cannot accept new steps.", "error");
       return;
     }
+    const editSession = revisionEditSessionRef.current;
+    if (
+      editSession?.kind !== "new-step"
+      || editSession.entityId !== branch.id
+      || editSession.revision !== branch.revision
+    ) {
+      rejectStaleDraft();
+      return;
+    }
     const draft = state.stepDraft;
     void runMutation(
       () => api.createStep(branch.id, {
@@ -791,7 +999,7 @@ export function useWorkspace({
         body_markdown: draft.body_markdown.trim(),
         concepts: parseTags(draft.concepts),
         depends_on_step_ids: [],
-        expected_branch_revision: branch.revision,
+        expected_branch_revision: editSession.revision,
         idempotency_key: crypto.randomUUID(),
         status: draft.status,
         summary: draft.summary.trim() || null,
@@ -807,7 +1015,7 @@ export function useWorkspace({
         stepDraft: EMPTY_STEP,
       })),
     );
-  }, [api, pushToast, runMutation, state.stepDraft, state.targetBranchId]);
+  }, [api, pushToast, rejectStaleDraft, runMutation, state.stepDraft, state.targetBranchId]);
 
   const connectSteps = useCallback((sourceStepId: string, targetStepId: string) => {
     const activeGraph = graphRef.current;
@@ -848,13 +1056,22 @@ export function useWorkspace({
       pushToast("Select a step before revising it.", "error");
       return;
     }
+    const editSession = revisionEditSessionRef.current;
+    if (
+      editSession?.kind !== "step"
+      || editSession.entityId !== step.id
+      || editSession.revision !== step.revision
+    ) {
+      rejectStaleDraft();
+      return;
+    }
     const draft = state.stepDraft;
     void runMutation(
       () => api.updateStep(step.id, {
         author_type: "human",
         body_markdown: draft.body_markdown.trim(),
         concepts: parseTags(draft.concepts),
-        expected_step_revision: step.revision,
+        expected_step_revision: editSession.revision,
         idempotency_key: crypto.randomUUID(),
         status: draft.status,
         summary: draft.summary.trim() || null,
@@ -865,7 +1082,7 @@ export function useWorkspace({
       activeGraph.objective.id,
       (result) => setState((current) => ({ ...current, selectedStepId: result.step_id })),
     );
-  }, [api, pushToast, runMutation, state.editingStepId, state.stepDraft]);
+  }, [api, pushToast, rejectStaleDraft, runMutation, state.editingStepId, state.stepDraft]);
 
   const createBranch = useCallback(() => {
     const activeGraph = graphRef.current;
@@ -893,12 +1110,21 @@ export function useWorkspace({
     const activeGraph = graphRef.current;
     const step = activeGraph?.steps.find((item) => item.id === state.targetStepId);
     if (!activeGraph || !step) return;
+    const editSession = revisionEditSessionRef.current;
+    if (
+      editSession?.kind !== "assumption"
+      || editSession.entityId !== step.id
+      || editSession.revision !== step.revision
+    ) {
+      rejectStaleDraft();
+      return;
+    }
     const draft = state.assumptionDraft;
     void runMutation(
       () => api.markAssumption(step.id, {
         assumption_status: draft.status,
         author_type: "human",
-        expected_step_revision: step.revision,
+        expected_step_revision: editSession.revision,
         idempotency_key: crypto.randomUUID(),
         label: draft.label.trim(),
         note_markdown: draft.note_markdown.trim(),
@@ -909,7 +1135,7 @@ export function useWorkspace({
       activeGraph.objective.id,
       () => setState((current) => ({ ...current, assumptionDraft: EMPTY_ASSUMPTION })),
     );
-  }, [api, runMutation, state.assumptionDraft, state.targetStepId]);
+  }, [api, rejectStaleDraft, runMutation, state.assumptionDraft, state.targetStepId]);
 
   const markDeadEnd = useCallback((stepId: string) => {
     const activeGraph = graphRef.current;
@@ -1050,12 +1276,23 @@ export function useWorkspace({
     const existingResult = activeGraph.reasoning_results.find(
       (result) => result.target_type === draft.target_type && result.target_id === target.id,
     );
+    const editSession = revisionEditSessionRef.current;
+    if (
+      editSession?.kind !== "result"
+      || editSession.targetId !== target.id
+      || editSession.targetType !== draft.target_type
+      || editSession.targetRevision !== target.revision
+      || editSession.resultRevision !== (existingResult?.revision ?? null)
+    ) {
+      rejectStaleDraft();
+      return;
+    }
 
     void runMutation(
       () => api.setReasoningResult(workspaceId, activeGraph.objective.id, {
         author_type: "human",
-        expected_result_revision: existingResult?.revision ?? null,
-        expected_target_revision: target.revision,
+        expected_result_revision: editSession.resultRevision,
+        expected_target_revision: editSession.targetRevision,
         idempotency_key: crypto.randomUUID(),
         outcome_status: draft.outcome_status,
         result_markdown: resultMarkdown,
@@ -1081,11 +1318,11 @@ export function useWorkspace({
         }));
       },
     );
-  }, [api, pushToast, runMutation, state.resultDraft, workspaceId]);
+  }, [api, pushToast, rejectStaleDraft, runMutation, state.resultDraft, workspaceId]);
 
   const refreshFromAgent = useCallback(async (signal: AbortSignal) => {
     if (!workspaceId) return;
-    setState((current) => ({ ...current, refreshing: true }));
+    const refreshOperation = beginRefreshing();
     try {
       const [refreshedOverview] = await Promise.all([
         fetchOverview(signal),
@@ -1094,9 +1331,84 @@ export function useWorkspace({
       const nextObjective = refreshedOverview ? objectiveForRoute(refreshedOverview, objectiveId) : null;
       if (nextObjective && nextObjective.id === objectiveId) await fetchObjectiveGraph(nextObjective.id, signal);
     } finally {
-      setState((current) => ({ ...current, refreshing: false }));
+      endRefreshing(refreshOperation);
     }
-  }, [fetchObjectiveGraph, fetchOverview, fetchPendingDecisions, objectiveId, workspaceId]);
+  }, [beginRefreshing, endRefreshing, fetchObjectiveGraph, fetchOverview, fetchPendingDecisions, objectiveId, workspaceId]);
+
+  const refreshFromRealtime = useCallback(async ({
+    activityEvents,
+    reconcile,
+    signal,
+  }: WorkspaceRealtimeInvalidation) => {
+    if (!workspaceId) return;
+
+    const refreshOperation = beginRefreshing();
+    try {
+      const activeObjectiveId = graphRef.current?.objective.id ?? objectiveId;
+      const activeGraphAffected = Boolean(
+        activeObjectiveId
+        && (
+          reconcile
+          || activityEvents.some((event) => (
+            event.objective_id === null || event.objective_id === activeObjectiveId
+          ))
+        ),
+      );
+      const pendingDecisionsAffected = reconcile
+        || activityEvents.some((event) => event.entity_type === "decisions");
+      const inactiveSidebarObjectives = new Set<string>();
+
+      if (reconcile) {
+        for (const expandedObjectiveId of expandedObjectiveIds) {
+          if (expandedObjectiveId !== activeObjectiveId) {
+            inactiveSidebarObjectives.add(expandedObjectiveId);
+          }
+        }
+      } else {
+        for (const event of activityEvents) {
+          if (
+            event.objective_id
+            && event.objective_id !== activeObjectiveId
+            && expandedObjectiveIds.includes(event.objective_id)
+            && (event.entity_type === "strategies" || event.entity_type === "branches")
+          ) {
+            inactiveSidebarObjectives.add(event.objective_id);
+          }
+        }
+      }
+
+      const refreshes: Promise<unknown>[] = [fetchOverview(signal)];
+      if (pendingDecisionsAffected) refreshes.push(fetchPendingDecisions(signal));
+      if (activeGraphAffected && activeObjectiveId) {
+        refreshes.push(fetchObjectiveGraph(activeObjectiveId, signal));
+      }
+      for (const inactiveObjectiveId of inactiveSidebarObjectives) {
+        refreshes.push(fetchObjectiveStrategies(inactiveObjectiveId, {
+          force: true,
+          signal,
+          silent: true,
+        }));
+      }
+      await Promise.all(refreshes);
+    } finally {
+      endRefreshing(refreshOperation);
+    }
+  }, [
+    beginRefreshing,
+    endRefreshing,
+    expandedObjectiveIds,
+    fetchObjectiveGraph,
+    fetchObjectiveStrategies,
+    fetchOverview,
+    fetchPendingDecisions,
+    objectiveId,
+    workspaceId,
+  ]);
+
+  const { status: realtimeStatus } = useWorkspaceRealtime({
+    onInvalidate: refreshFromRealtime,
+    workspaceId,
+  });
 
   const selectObjective = useCallback((nextObjectiveId: string) => {
     if (!workspaceId) return;
@@ -1314,6 +1626,16 @@ export function useWorkspace({
       return;
     }
 
+    if (
+      notice.stepId
+      && !activeGraph?.steps.some((step) => step.id === notice.stepId)
+    ) {
+      // The originating WebMCP refresh and the Realtime reconciliation can
+      // overlap. Preserve the focus request until whichever canonical fetch
+      // commits the new node, instead of losing the post-mutation highlight.
+      pendingExternalMutationRef.current = notice;
+    }
+
     if (activeGraph) {
       // A refreshed step may be scrolled into view, but only a direct node click
       // is allowed to change the step currently open in the inspector.
@@ -1362,12 +1684,22 @@ export function useWorkspace({
     openOldestPendingDecisionForObjective,
     openOldestPendingDecisionForStrategy,
     openPendingDecision,
-    openAssumption: (stepId) => setState((current) => ({
-      ...current,
-      activeDialog: "assumption",
-      assumptionDraft: EMPTY_ASSUMPTION,
-      targetStepId: stepId,
-    })),
+    openAssumption: (stepId) => {
+      const step = graphRef.current?.steps.find((candidate) => candidate.id === stepId);
+      if (!step) return;
+      revisionEditSessionRef.current = {
+        entityId: step.id,
+        kind: "assumption",
+        revision: step.revision,
+      };
+      setDraftConflict(null);
+      setState((current) => ({
+        ...current,
+        activeDialog: "assumption",
+        assumptionDraft: EMPTY_ASSUMPTION,
+        targetStepId: stepId,
+      }));
+    },
     openBranch: (stepId) => setState((current) => ({
       ...current,
       activeDialog: "branch",
@@ -1424,6 +1756,12 @@ export function useWorkspace({
         return;
       }
       const { objective } = activeGraph;
+      revisionEditSessionRef.current = {
+        entityId: objective.id,
+        kind: "objective",
+        revision: objective.revision,
+      };
+      setDraftConflict(null);
       setState((current) => ({
         ...current,
         activeDialog: "objective",
@@ -1438,6 +1776,12 @@ export function useWorkspace({
     openEditStep: (stepId) => {
       const step = graphRef.current?.steps.find((item) => item.id === stepId);
       if (!step) return;
+      revisionEditSessionRef.current = {
+        entityId: step.id,
+        kind: "step",
+        revision: step.revision,
+      };
+      setDraftConflict(null);
       setState((current) => ({
         ...current,
         activeDialog: "step",
@@ -1453,15 +1797,27 @@ export function useWorkspace({
         targetBranchId: step.branch_id,
       }));
     },
-    openNewObjective: () => setState((current) => ({
-      ...current,
-      activeDialog: "objective",
-      editingObjectiveId: null,
-      objectiveDraft: EMPTY_OBJECTIVE,
-    })),
+    openNewObjective: () => {
+      revisionEditSessionRef.current = null;
+      setDraftConflict(null);
+      setState((current) => ({
+        ...current,
+        activeDialog: "objective",
+        editingObjectiveId: null,
+        objectiveDraft: EMPTY_OBJECTIVE,
+      }));
+    },
     openNewStep: (branchId) => {
-      const selection = resolveBranchSelection(graphRef.current, branchId);
-      if (!selection) return;
+      const activeGraph = graphRef.current;
+      const selection = resolveBranchSelection(activeGraph, branchId);
+      const branch = activeGraph?.branches.find((candidate) => candidate.id === branchId);
+      if (!selection || !branch) return;
+      revisionEditSessionRef.current = {
+        entityId: branch.id,
+        kind: "new-step",
+        revision: branch.revision,
+      };
+      setDraftConflict(null);
       setState((current) => ({
         ...current,
         ...selection,
@@ -1486,6 +1842,8 @@ export function useWorkspace({
       const existingResult = activeGraph.reasoning_results.find(
         (result) => result.target_type === targetType && result.target_id === targetId,
       );
+      revisionEditSessionRef.current = resultEditSession(activeGraph, targetType, targetId);
+      setDraftConflict(null);
       const selection = targetType === "branch"
         ? resolveBranchSelection(activeGraph, targetId)
         : {
@@ -1549,19 +1907,31 @@ export function useWorkspace({
       ...current,
       objectiveDraft: { ...current.objectiveDraft, [field]: value },
     })),
-    setResultDraft: (field, value) => setState((current) => {
-      if (field !== "target_type") {
-        return { ...current, resultDraft: { ...current.resultDraft, [field]: value } } as WorkspacePageState;
+    setResultDraft: (field, value) => {
+      if (field !== "target_type" && field !== "target_id") {
+        setState((current) => ({
+          ...current,
+          resultDraft: { ...current.resultDraft, [field]: value },
+        } as WorkspacePageState));
+        return;
       }
-      const targetType = value === "strategy" ? "strategy" : "branch";
       const activeGraph = graphRef.current;
-      const targetId = targetType === "branch"
-        ? current.selectedBranchId ?? activeGraph?.branches[0]?.id ?? ""
-        : current.selectedStrategyId ?? activeGraph?.strategies[0]?.id ?? "";
+      const targetType = field === "target_type"
+        ? (value === "strategy" ? "strategy" : "branch")
+        : state.resultDraft.target_type;
+      const targetId = field === "target_id"
+        ? value
+        : targetType === "branch"
+          ? state.selectedBranchId ?? activeGraph?.branches[0]?.id ?? ""
+          : state.selectedStrategyId ?? activeGraph?.strategies[0]?.id ?? "";
       const existingResult = activeGraph?.reasoning_results.find(
         (result) => result.target_type === targetType && result.target_id === targetId,
       );
-      return {
+      revisionEditSessionRef.current = activeGraph
+        ? resultEditSession(activeGraph, targetType, targetId)
+        : null;
+      setDraftConflict(null);
+      setState((current) => ({
         ...current,
         resultDraft: {
           outcome_status: existingResult?.outcome_status ?? "inconclusive",
@@ -1569,8 +1939,8 @@ export function useWorkspace({
           target_id: targetId,
           target_type: targetType,
         },
-      };
-    }),
+      }));
+    },
     setStepDraft: (field, value) => setState((current) => ({
       ...current,
       stepDraft: { ...current.stepDraft, [field]: value },
@@ -1611,6 +1981,7 @@ export function useWorkspace({
     selectObjective,
     selectStrategy,
     state.editingStepId,
+    state.resultDraft.target_type,
     state.selectedBranchId,
     state.selectedStrategyId,
     submitResult,
@@ -1622,6 +1993,7 @@ export function useWorkspace({
   return useMemo(
     () => ({
       actions,
+      draftConflict,
       error,
       expandedObjectiveIds,
       graph,
@@ -1631,11 +2003,13 @@ export function useWorkspace({
       objectiveStrategies,
       overview,
       pendingDecisions,
+      realtimeStatus,
       refreshFromAgent,
       state,
     }),
     [
       actions,
+      draftConflict,
       error,
       expandedObjectiveIds,
       graph,
@@ -1645,6 +2019,7 @@ export function useWorkspace({
       objectiveStrategies,
       overview,
       pendingDecisions,
+      realtimeStatus,
       refreshFromAgent,
       state,
     ],

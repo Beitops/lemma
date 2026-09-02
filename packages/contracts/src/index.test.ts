@@ -17,6 +17,7 @@ import {
   getSkillInputSchema,
   getSkillResultSchema,
   LEMMA_REASONING_WORKSPACE_SKILL,
+  markAssumptionInputSchema,
   markEndInputSchema,
   markEndResultSchema,
   objectiveSchema,
@@ -180,6 +181,24 @@ describe("Lemma contracts", () => {
         ...agentAuthor,
       }).success,
     ).toBe(true);
+  });
+
+  it("requires the current step revision before attaching an assumption", () => {
+    const input = {
+      author_type: "human" as const,
+      idempotency_key: "assumption-create-001",
+      label: "Non-zero denominator",
+      statement_markdown: "$x \\neq 0$.",
+      step_id: stepId,
+    };
+
+    expect(markAssumptionInputSchema.safeParse(input).success).toBe(false);
+    expect(
+      markAssumptionInputSchema.safeParse({ ...input, expected_step_revision: 1 }).success,
+    ).toBe(true);
+    expect(
+      markAssumptionInputSchema.safeParse({ ...input, expected_step_revision: 0 }).success,
+    ).toBe(false);
   });
 
   it("preserves branch lineage as an all-or-nothing pair", () => {
@@ -581,6 +600,10 @@ describe("Lemma contracts", () => {
         target_step_id: { description: expect.stringContaining("resource") },
       },
     });
+    expect(webMcpToolRegistry.mark_assumption.input_json_schema.required).toContain(
+      "expected_step_revision",
+    );
+    expect(webMcpToolRegistry.mark_assumption.description).toContain("expected_step_revision");
     expect(webMcpToolRegistry.find_steps.input_json_schema).toMatchObject({
       required: ["workspace_id", "query"],
       type: "object",
