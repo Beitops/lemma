@@ -119,6 +119,7 @@ update_objective
 list_strategies
 create_strategy
 create_step
+create_step_dependency
 update_step
 branch_from_step
 mark_assumption

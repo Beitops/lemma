@@ -370,6 +370,7 @@ describe("useWorkspace multi-objective state", () => {
       ordinal: 2,
       step_id: createdStepId,
       step_revision: 1,
+      step_dependencies: [],
     }));
     const branchFromStep = vi.fn(async () => ({
       branch_id: createdBranchId,
@@ -386,6 +387,9 @@ describe("useWorkspace multi-objective state", () => {
     act(() => result.current.actions.openNewStep(BRANCH_A_ID));
     act(() => result.current.actions.submitStep());
     await waitFor(() => expect(createStep).toHaveBeenCalledOnce());
+    expect(createStep).toHaveBeenCalledWith(BRANCH_A_ID, expect.objectContaining({
+      depends_on_step_ids: [],
+    }));
     await waitFor(() => expect(result.current.state.busy).toBe(false));
     expect(result.current.state.selectedBranchId).toBe(BRANCH_A_ID);
     expect(result.current.state.selectedStepId).toBeNull();
@@ -562,6 +566,12 @@ describe("useWorkspace multi-objective state", () => {
     act(() => result.current.actions.connectSteps(source.id, target.id));
 
     await waitFor(() => expect(createStepDependency).toHaveBeenCalledOnce());
+    expect(createStepDependency).toHaveBeenCalledWith(WORKSPACE_ID, {
+      author_type: "human",
+      idempotency_key: expect.any(String),
+      source_step_id: source.id,
+      target_step_id: target.id,
+    });
     await waitFor(() => expect(options.pushToast).toHaveBeenCalledWith(
       "Dependency saved: “Target n/2” now depends on “Source α”.",
       "success",

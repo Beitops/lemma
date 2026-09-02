@@ -7,6 +7,7 @@ import {
   type CreateContextLinkInput,
   type CreateContextTextInput,
   type CreateObjectiveInput,
+  type CreateStepDependencyInput,
   type CreateStepInput,
   type CreateStrategyInput,
   type FindStepsInput,
@@ -94,6 +95,7 @@ const MUTATION_TOOL_NAMES = new Set<WebMcpToolName>([
   "create_context",
   "create_strategy",
   "create_step",
+  "create_step_dependency",
   "update_step",
   "branch_from_step",
   "mark_assumption",
@@ -309,6 +311,16 @@ async function invokeTool(
       const { branch_id, ...request } = input;
       const data = await runtime.api.createStep(branch_id, request, signal);
       return { data, highlight: { id: data.step_id, type: "step" }, mutated: true };
+    }
+    case "create_step_dependency": {
+      const input = parsedInput as CreateStepDependencyInput;
+      const { workspace_id, ...request } = input;
+      const data = await runtime.api.createStepDependency(workspace_id, request, signal);
+      return {
+        data,
+        highlight: { id: data.target_step_id, type: "step" },
+        mutated: true,
+      };
     }
     case "update_step": {
       const input = parsedInput as UpdateStepInput;

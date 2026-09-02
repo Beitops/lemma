@@ -5,8 +5,10 @@ import {
   createContextItemResultSchema,
   createContextTextInputSchema,
   createObjectiveInputSchema,
+  createStepInputSchema,
   createStepDependencyInputSchema,
   createStepDependencyResultSchema,
+  createStepResultSchema,
   createStrategyInputSchema,
   decisionSchema,
   findStepsInputSchema,
@@ -415,6 +417,7 @@ describe("Lemma contracts", () => {
   it("validates a narrow, retry-safe directed dependency connection", () => {
     const targetStepId = "723e4567-e89b-42d3-a456-426614174000";
     const input = {
+      ...agentAuthor,
       idempotency_key: "823e4567-e89b-42d3-a456-426614174000",
       source_step_id: stepId,
       target_step_id: targetStepId,
@@ -424,6 +427,12 @@ describe("Lemma contracts", () => {
     expect(createStepDependencyInputSchema.safeParse(input).success).toBe(true);
     expect(
       createStepDependencyInputSchema.safeParse({ ...input, target_step_id: stepId }).success,
+    ).toBe(false);
+    expect(
+      createStepDependencyInputSchema.safeParse({
+        ...input,
+        author_agent_name: undefined,
+      }).success,
     ).toBe(false);
     expect(
       createStepDependencyResultSchema.safeParse({
@@ -437,17 +446,83 @@ describe("Lemma contracts", () => {
     ).toBe(true);
   });
 
-  it("publishes trusted v2 operating instructions without single-workspace objective wording", () => {
+  it("creates a step with unique prerequisite IDs and returns its atomic dependency receipts", () => {
+    const dependentStepId = "a23e4567-e89b-42d3-a456-426614174000";
+    const input = {
+      ...agentAuthor,
+      body_markdown: "By the previous lemma, the claim follows.",
+      branch_id: branchId,
+      expected_branch_revision: 1,
+      idempotency_key: "step-create-001",
+      title: "Apply the previous lemma",
+    };
+
+    expect(createStepInputSchema.parse(input).depends_on_step_ids).toEqual([]);
+    expect(createStepInputSchema.parse({
+      ...input,
+      depends_on_step_ids: [stepId],
+    }).depends_on_step_ids).toEqual([stepId]);
+
+    const duplicatePrerequisites = createStepInputSchema.safeParse({
+      ...input,
+      depends_on_step_ids: [stepId, stepId],
+    });
+    expect(duplicatePrerequisites.success).toBe(false);
+    if (duplicatePrerequisites.success) throw new Error("Expected duplicate prerequisites to fail.");
+    expect(duplicatePrerequisites.error.issues).toContainEqual(expect.objectContaining({
+      message: "depends_on_step_ids must not contain duplicate step IDs.",
+      path: ["depends_on_step_ids"],
+    }));
+
+    const tooManyPrerequisites = Array.from(
+      { length: 65 },
+      (_, index) => `b23e4567-e89b-42d3-a456-${String(index + 1).padStart(12, "0")}`,
+    );
+    expect(createStepInputSchema.safeParse({
+      ...input,
+      depends_on_step_ids: tooManyPrerequisites,
+    }).success).toBe(false);
+
+    const result = {
+      branch_id: branchId,
+      branch_revision: 2,
+      ordinal: 1,
+      step_dependencies: [{
+        dependency_revision: 1,
+        source_step_id: stepId,
+        step_dependency_id: "c23e4567-e89b-42d3-a456-426614174000",
+        target_step_id: dependentStepId,
+      }],
+      step_id: dependentStepId,
+      step_revision: 1,
+    };
+    expect(createStepResultSchema.parse({ ...result, step_dependencies: undefined }).step_dependencies)
+      .toEqual([]);
+    expect(createStepResultSchema.safeParse(result).success).toBe(true);
+    expect(createStepResultSchema.safeParse({
+      ...result,
+      step_dependencies: [{ ...result.step_dependencies[0], unexpected: true }],
+    }).success).toBe(false);
+  });
+
+  it("publishes trusted v2.2 operating instructions without single-workspace objective wording", () => {
     expect(getSkillInputSchema.safeParse({}).success).toBe(true);
     expect(getSkillInputSchema.safeParse({ workspace_id: workspaceId }).success).toBe(false);
     expect(getSkillResultSchema.safeParse(LEMMA_REASONING_WORKSPACE_SKILL).success).toBe(true);
-    expect(LEMMA_REASONING_WORKSPACE_SKILL.skill_version).toBe("2.0.0");
+    expect(LEMMA_REASONING_WORKSPACE_SKILL.skill_version).toBe("2.2.0");
     expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("`get_objective`");
     expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("`set_reasoning_result`");
     expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("`strategy_id`");
     expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("`branch_id`");
     expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("`status`");
     expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("`retrieval_mode`");
+    expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("`create_step_dependency`");
+    expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("`depends_on_step_ids`");
+    expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("atomically");
+    expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("same objective");
+    expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("self-dependency");
+    expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("duplicate");
+    expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).toContain("cycle");
     expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).not.toContain("workspace objective");
     expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).not.toContain("set_workspace_result");
   });
@@ -459,6 +534,7 @@ describe("Lemma contracts", () => {
       "create_context",
       "create_objective",
       "create_step",
+      "create_step_dependency",
       "create_strategy",
       "find_steps",
       "generate_clean_solution",
@@ -482,6 +558,27 @@ describe("Lemma contracts", () => {
       additionalProperties: false,
       properties: {
         body_markdown: { description: expect.stringContaining("$...") },
+        depends_on_step_ids: {
+          description: expect.stringContaining("prerequisite"),
+          maxItems: 64,
+        },
+      },
+    });
+    expect(webMcpToolRegistry.create_step.description).toContain("depends_on_step_ids");
+    expect(webMcpToolRegistry.create_step.description).toContain("atomically");
+    expect(webMcpToolRegistry.create_step_dependency.input_json_schema).toMatchObject({
+      required: [
+        "workspace_id",
+        "source_step_id",
+        "target_step_id",
+        "idempotency_key",
+        "author_type",
+      ],
+      type: "object",
+      properties: {
+        idempotency_key: { description: expect.stringContaining("UUID") },
+        source_step_id: { description: expect.stringContaining("resource") },
+        target_step_id: { description: expect.stringContaining("resource") },
       },
     });
     expect(webMcpToolRegistry.find_steps.input_json_schema).toMatchObject({
@@ -502,6 +599,7 @@ describe("Lemma contracts", () => {
     expect(webMcpToolRegistry.get_workspace.read_only_hint).toBe(true);
     expect(webMcpToolRegistry.get_objective.read_only_hint).toBe(true);
     expect(webMcpToolRegistry.create_objective.read_only_hint).toBe(false);
+    expect(webMcpToolRegistry.create_step_dependency.read_only_hint).toBe(false);
     expect(webMcpToolRegistry.set_reasoning_result.read_only_hint).toBe(false);
     expect(webMcpToolRegistry.get_objective.annotations.untrustedContentHint).toBe(true);
     expect(webMcpToolRegistry.get_skill.annotations.untrustedContentHint).toBe(false);

@@ -3,7 +3,7 @@
 begin;
 set local search_path = public, extensions;
 
-select plan(80);
+select plan(84);
 
 select has_extension('vector', 'pgvector is installed');
 select has_extension('pgtap', 'pgTAP is installed');
@@ -349,6 +349,64 @@ select ok(
   'idempotent context creation RPC exists'
 );
 select ok(to_regprocedure('public.create_strategy(uuid,uuid,text,text,text,text,text,text)') is not null, 'objective-scoped create_strategy RPC exists');
+select ok(
+  to_regprocedure(
+    'public.create_step(uuid,text,text,bigint,text,text,text[],text[],text,uuid,text,text,uuid[])'
+  ) is not null
+  and to_regprocedure(
+    'public.create_step(uuid,text,text,bigint,text,text,text[],text[],text,uuid,text,text)'
+  ) is null,
+  'create_step has one dependency-aware signature and the legacy overload is removed'
+);
+select ok(
+  exists (
+    select 1
+    from pg_proc as procedure
+    join pg_language as language on language.oid = procedure.prolang
+    where procedure.oid = (
+      'public.create_step(uuid,text,text,bigint,text,text,text[],text[],text,uuid,text,text,uuid[])'
+    )::regprocedure
+      and language.lanname = 'plpgsql'
+      and not procedure.prosecdef
+  )
+  and has_function_privilege(
+    'authenticated',
+    'public.create_step(uuid,text,text,bigint,text,text,text[],text[],text,uuid,text,text,uuid[])',
+    'execute'
+  )
+  and not has_function_privilege(
+    'anon',
+    'public.create_step(uuid,text,text,bigint,text,text,text[],text[],text,uuid,text,text,uuid[])',
+    'execute'
+  ),
+  'dependency-aware create_step is security-invoker and executable only by authenticated callers'
+);
+select ok(
+  to_regprocedure('public.create_step_dependency(uuid,uuid,uuid,uuid,text,text)') is not null
+  and to_regprocedure('public.create_step_dependency(uuid,uuid,uuid,text,text,text)') is null,
+  'agent-aware create_step_dependency uses UUID idempotency and explicit source/target arguments'
+);
+select ok(
+  exists (
+    select 1
+    from pg_proc as procedure
+    join pg_language as language on language.oid = procedure.prolang
+    where procedure.oid = 'public.create_step_dependency(uuid,uuid,uuid,uuid,text,text)'::regprocedure
+      and language.lanname = 'plpgsql'
+      and not procedure.prosecdef
+  )
+  and has_function_privilege(
+    'authenticated',
+    'public.create_step_dependency(uuid,uuid,uuid,uuid,text,text)',
+    'execute'
+  )
+  and not has_function_privilege(
+    'anon',
+    'public.create_step_dependency(uuid,uuid,uuid,uuid,text,text)',
+    'execute'
+  ),
+  'step dependency mutation is security-invoker and executable only by authenticated callers'
+);
 select ok(to_regprocedure('public.set_reasoning_result(uuid,uuid,text,uuid,bigint,bigint,text,text,text,text,text)') is not null, 'set_reasoning_result RPC exists');
 select ok(to_regprocedure('public.request_human_decision(uuid,text,text,uuid,uuid,uuid,uuid,text,text,text)') is not null, 'objective-targeted decision RPC exists');
 select ok(to_regprocedure('public.get_workspace_overview(uuid)') is not null, 'get_workspace_overview RPC exists');

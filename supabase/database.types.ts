@@ -1163,6 +1163,7 @@ export type Database = {
           p_body_markdown: string
           p_branch_id: string
           p_concepts?: string[]
+          p_depends_on_step_ids?: string[]
           p_expected_branch_revision: number
           p_idempotency_key: string
           p_status?: string
@@ -1170,6 +1171,17 @@ export type Database = {
           p_supersedes_step_id?: string
           p_theorem_tags?: string[]
           p_title: string
+        }
+        Returns: Json
+      }
+      create_step_dependency: {
+        Args: {
+          p_author_agent_name?: string
+          p_author_type?: string
+          p_idempotency_key: string
+          p_source_step_id: string
+          p_target_step_id: string
+          p_workspace_id: string
         }
         Returns: Json
       }

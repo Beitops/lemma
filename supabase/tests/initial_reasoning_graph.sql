@@ -27,8 +27,11 @@ declare
   root_b uuid;
   root_other_workspace uuid;
   step_a uuid;
+  step_a_dependent uuid;
+  atomic_step uuid;
   step_b uuid;
   step_other_workspace uuid;
+  dependency_id uuid;
   general_context uuid;
   context_a uuid;
   context_b uuid;
@@ -48,9 +51,13 @@ declare
   context_payload jsonb;
   branch_a_revision bigint;
   branch_b_revision bigint;
+  branch_revision_before_atomic bigint;
+  branch_revision_after_atomic bigint;
   strategy_a_revision bigint;
   strategy_b_revision bigint;
   search_count integer;
+  step_count_before_invalid integer;
+  dependency_count_before_invalid integer;
   pending_decision_ids uuid[];
   expected_pending_decision_ids uuid[];
 begin
@@ -245,6 +252,15 @@ begin
   step_a := (result ->> 'step_id')::uuid;
 
   result := public.create_step(
+    root_a,
+    'Goal A dependent conclusion',
+    'The first conclusion follows from the preceding Goal A step.',
+    2,
+    'test-create-step-a-000002'
+  );
+  step_a_dependent := (result ->> 'step_id')::uuid;
+
+  result := public.create_step(
     root_b,
     'Goal B shared lemma',
     'The shared lemma gives the second conclusion.',
@@ -296,6 +312,125 @@ begin
     insert into public.step_dependencies (workspace_id, step_id, depends_on_step_id)
     values (workspace_one, step_a, step_b);
     raise exception 'cross-objective dependency was accepted';
+  exception
+    when check_violation then null;
+  end;
+
+  -- Dependencies are persisted relations, not inferred from prose. A first
+  -- agent-authored insert owns its UUID idempotency key; retries replay the
+  -- receipt, while an independently keyed duplicate active edge reports that
+  -- no second edge was created.
+  result := public.create_step_dependency(
+    workspace_one,
+    step_a,
+    step_a_dependent,
+    'e1111111-1111-4111-8111-111111111111',
+    'agent',
+    'Dependency test agent'
+  );
+  dependency_id := (result ->> 'step_dependency_id')::uuid;
+  if dependency_id <> 'e1111111-1111-4111-8111-111111111111'::uuid
+    or result ->> 'workspace_id' <> workspace_one::text
+    or result ->> 'source_step_id' <> step_a::text
+    or result ->> 'target_step_id' <> step_a_dependent::text
+    or result ->> 'created' <> 'true'
+    or not exists (
+      select 1
+      from public.step_dependencies as dependency
+      where dependency.id = dependency_id
+        and dependency.workspace_id = workspace_one
+        and dependency.depends_on_step_id = step_a
+        and dependency.step_id = step_a_dependent
+        and dependency.relation_kind = 'logical'
+        and dependency.status = 'active'
+        and dependency.author_type = 'agent'
+        and dependency.author_user_id = '11111111-1111-4111-8111-111111111111'::uuid
+        and dependency.author_agent_name = 'Dependency test agent'
+    )
+    or not exists (
+      select 1
+      from public.activity_events as event
+      where event.workspace_id = workspace_one
+        and event.objective_id = objective_a
+        and event.entity_type = 'step_dependencies'
+        and event.entity_id = dependency_id
+        and event.event_type = 'insert'
+        and event.actor_type = 'agent'
+        and event.actor_user_id = '11111111-1111-4111-8111-111111111111'::uuid
+        and event.actor_agent_name = 'Dependency test agent'
+    ) then
+    raise exception 'agent dependency did not persist orientation, authorship, and activity';
+  end if;
+
+  retry_result := public.create_step_dependency(
+    workspace_one,
+    step_a,
+    step_a_dependent,
+    'e1111111-1111-4111-8111-111111111111',
+    'human'
+  );
+  if retry_result <> result then
+    raise exception 'dependency receipt retry did not return the original result';
+  end if;
+
+  retry_result := public.create_step_dependency(
+    workspace_one,
+    step_a,
+    step_a_dependent,
+    'e2222222-2222-4222-8222-222222222222',
+    'agent',
+    'Dependency test agent'
+  );
+  select count(*) into search_count
+  from public.step_dependencies as dependency
+  where dependency.workspace_id = workspace_one
+    and dependency.depends_on_step_id = step_a
+    and dependency.step_id = step_a_dependent
+    and dependency.status = 'active';
+  if retry_result ->> 'step_dependency_id' <> dependency_id::text
+    or retry_result ->> 'created' <> 'false'
+    or search_count <> 1 then
+    raise exception 'duplicate active dependency did not return the existing edge';
+  end if;
+
+  begin
+    perform public.create_step_dependency(
+      workspace_one,
+      step_a,
+      step_a,
+      'e3333333-3333-4333-8333-333333333333',
+      'agent',
+      'Dependency test agent'
+    );
+    raise exception 'self dependency was accepted';
+  exception
+    when invalid_parameter_value then null;
+  end;
+
+  begin
+    perform public.create_step_dependency(
+      workspace_one,
+      step_a,
+      step_b,
+      'e4444444-4444-4444-8444-444444444444',
+      'agent',
+      'Dependency test agent'
+    );
+    raise exception 'cross-objective dependency RPC was accepted';
+  exception
+    when check_violation then null;
+  end;
+
+  begin
+    perform public.create_step_dependency(
+      workspace_one,
+      step_a_dependent,
+      step_a,
+      'e5555555-5555-4555-8555-555555555555',
+      'agent',
+      'Dependency test agent'
+    );
+    raise exception 'dependency cycle was accepted';
   exception
     when check_violation then null;
   end;
@@ -627,8 +762,19 @@ begin
   end if;
   if jsonb_array_length(graph_a -> 'strategies') <> 1
     or graph_a -> 'strategies' -> 0 ->> 'id' <> strategy_a::text
-    or jsonb_array_length(graph_a -> 'steps') <> 1
-    or graph_a -> 'steps' -> 0 ->> 'id' <> step_a::text
+    or jsonb_array_length(graph_a -> 'steps') <> 2
+    or not (
+      graph_a -> 'steps' @> jsonb_build_array(
+        jsonb_build_object('id', step_a),
+        jsonb_build_object('id', step_a_dependent)
+      )
+    )
+    or jsonb_array_length(graph_a -> 'step_dependencies') <> 1
+    or not (
+      graph_a -> 'step_dependencies' @> jsonb_build_array(
+        jsonb_build_object('id', dependency_id)
+      )
+    )
     or jsonb_array_length(graph_a -> 'objective_context_items') <> 1
     or graph_a -> 'objective_context_items' -> 0 ->> 'id' <> context_a::text
     or jsonb_array_length(graph_a -> 'reasoning_results') <> 2
@@ -668,7 +814,7 @@ begin
       where objective ->> 'id' = objective_a::text
         and (objective ->> 'strategy_count')::integer = 1
         and (objective ->> 'branch_count')::integer = 1
-        and (objective ->> 'step_count')::integer = 1
+        and (objective ->> 'step_count')::integer = 2
     ) then
     raise exception 'workspace overview objective summary test failed';
   end if;
@@ -715,6 +861,166 @@ begin
   where found.step_id = step_other_workspace;
   if search_count <> 0 then
     raise exception 'workspace-wide retrieval leaked another workspace';
+  end if;
+
+  -- A step and all of its prerequisite edges share one mutation receipt and
+  -- transaction. The graph records the prerequisite as depends_on_step_id and
+  -- the new conclusion as step_id, while retaining agent provenance in both
+  -- the relation and its activity event.
+  select revision into branch_revision_before_atomic
+  from public.branches
+  where id = root_a;
+  result := public.create_step(
+    p_branch_id => root_a,
+    p_title => 'Goal A atomic dependent conclusion',
+    p_body_markdown => 'This conclusion records both prerequisites when it is created.',
+    p_expected_branch_revision => branch_revision_before_atomic,
+    p_idempotency_key => 'test-create-step-with-dependencies-01',
+    p_author_type => 'agent',
+    p_author_agent_name => 'Atomic dependency test agent',
+    p_depends_on_step_ids => array[step_a_dependent, step_a]
+  );
+  atomic_step := (result ->> 'step_id')::uuid;
+  select revision into branch_revision_after_atomic
+  from public.branches
+  where id = root_a;
+  if atomic_step is null
+    or (result ->> 'branch_revision')::bigint <> branch_revision_before_atomic + 1
+    or branch_revision_after_atomic <> branch_revision_before_atomic + 1
+    or coalesce(jsonb_array_length(result -> 'step_dependencies'), -1) <> 2
+    -- Returned dependencies preserve the caller's source-step order.
+    or result -> 'step_dependencies' -> 0 ->> 'source_step_id' <> step_a_dependent::text
+    or result -> 'step_dependencies' -> 1 ->> 'source_step_id' <> step_a::text
+    or result -> 'step_dependencies' -> 0 ->> 'target_step_id' <> atomic_step::text
+    or result -> 'step_dependencies' -> 1 ->> 'target_step_id' <> atomic_step::text
+    or coalesce((result -> 'step_dependencies' -> 0 ->> 'dependency_revision')::bigint, 0) <> 1
+    or coalesce((result -> 'step_dependencies' -> 1 ->> 'dependency_revision')::bigint, 0) <> 1
+    or (
+      select count(*)
+      from public.step_dependencies as dependency
+      where dependency.workspace_id = workspace_one
+        and dependency.step_id = atomic_step
+        and dependency.depends_on_step_id = any(array[step_a_dependent, step_a])
+        and dependency.relation_kind = 'logical'
+        and dependency.status = 'active'
+        and dependency.author_type = 'agent'
+        and dependency.author_user_id = '11111111-1111-4111-8111-111111111111'::uuid
+        and dependency.author_agent_name = 'Atomic dependency test agent'
+    ) <> 2
+    or (
+      select count(*)
+      from public.activity_events as event
+      where event.workspace_id = workspace_one
+        and event.objective_id = objective_a
+        and event.entity_type = 'step_dependencies'
+        and event.event_type = 'insert'
+        and event.actor_type = 'agent'
+        and event.actor_user_id = '11111111-1111-4111-8111-111111111111'::uuid
+        and event.actor_agent_name = 'Atomic dependency test agent'
+        and event.entity_id in (
+          select dependency.id
+          from public.step_dependencies as dependency
+          where dependency.step_id = atomic_step
+        )
+    ) <> 2 then
+    raise exception 'atomic dependency-aware step creation did not retain graph orientation or agent provenance';
+  end if;
+
+  retry_result := public.create_step(
+    p_branch_id => root_a,
+    p_title => 'Ignored retry title',
+    p_body_markdown => 'Ignored retry body.',
+    p_expected_branch_revision => branch_revision_before_atomic,
+    p_idempotency_key => 'test-create-step-with-dependencies-01',
+    p_author_type => 'human',
+    p_depends_on_step_ids => array[step_a_dependent, step_a]
+  );
+  if retry_result <> result then
+    raise exception 'dependency-aware step receipt retry did not return the original result';
+  end if;
+
+  select count(*) into step_count_before_invalid
+  from public.steps
+  where branch_id = root_a;
+  select count(*) into dependency_count_before_invalid
+  from public.step_dependencies
+  where workspace_id = workspace_one;
+
+  begin
+    perform public.create_step(
+      p_branch_id => root_a,
+      p_title => 'Invalid prerequisite must roll back',
+      p_body_markdown => 'This step must not be persisted.',
+      p_expected_branch_revision => branch_revision_after_atomic,
+      p_idempotency_key => 'test-create-step-with-missing-dependency-01',
+      p_depends_on_step_ids => array['f1111111-1111-4111-8111-111111111111'::uuid]
+    );
+    raise exception 'missing prerequisite was accepted';
+  exception
+    when no_data_found then null;
+  end;
+
+  begin
+    perform public.create_step(
+      p_branch_id => root_a,
+      p_title => 'Cross-objective prerequisite must roll back',
+      p_body_markdown => 'This step must not be persisted.',
+      p_expected_branch_revision => branch_revision_after_atomic,
+      p_idempotency_key => 'test-create-step-with-cross-objective-dependency-01',
+      p_depends_on_step_ids => array[step_b]
+    );
+    raise exception 'cross-objective prerequisite was accepted';
+  exception
+    when check_violation then null;
+  end;
+
+  begin
+    perform public.create_step(
+      p_branch_id => root_a,
+      p_title => 'Duplicate prerequisite must roll back',
+      p_body_markdown => 'This step must not be persisted.',
+      p_expected_branch_revision => branch_revision_after_atomic,
+      p_idempotency_key => 'test-create-step-with-duplicate-dependency-01',
+      p_depends_on_step_ids => array[step_a, step_a]
+    );
+    raise exception 'duplicate prerequisite was accepted';
+  exception
+    when invalid_parameter_value then null;
+  end;
+
+  begin
+    perform public.create_step(
+      p_branch_id => root_a,
+      p_title => 'Null prerequisite must roll back',
+      p_body_markdown => 'This step must not be persisted.',
+      p_expected_branch_revision => branch_revision_after_atomic,
+      p_idempotency_key => 'test-create-step-with-null-dependency-01',
+      p_depends_on_step_ids => array[step_a, null::uuid]
+    );
+    raise exception 'null prerequisite was accepted';
+  exception
+    when invalid_parameter_value then null;
+  end;
+
+  begin
+    perform public.create_step(
+      p_branch_id => root_a,
+      p_title => 'Too many prerequisites must roll back',
+      p_body_markdown => 'This step must not be persisted.',
+      p_expected_branch_revision => branch_revision_after_atomic,
+      p_idempotency_key => 'test-create-step-with-too-many-dependencies-01',
+      p_depends_on_step_ids => array_fill(step_a, array[65])
+    );
+    raise exception 'too many prerequisites were accepted';
+  exception
+    when invalid_parameter_value then null;
+  end;
+
+  if (select count(*) from public.steps where branch_id = root_a) <> step_count_before_invalid
+    or (select count(*) from public.step_dependencies where workspace_id = workspace_one)
+      <> dependency_count_before_invalid
+    or (select revision from public.branches where id = root_a) <> branch_revision_after_atomic then
+    raise exception 'invalid prerequisite input changed a step, dependency, or branch revision';
   end if;
 
   -- RLS hides both direct rows and all new graph/read mutations from another owner.

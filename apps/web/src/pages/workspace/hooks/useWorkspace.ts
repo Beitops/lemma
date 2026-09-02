@@ -790,6 +790,7 @@ export function useWorkspace({
         author_type: "human",
         body_markdown: draft.body_markdown.trim(),
         concepts: parseTags(draft.concepts),
+        depends_on_step_ids: [],
         expected_branch_revision: branch.revision,
         idempotency_key: crypto.randomUUID(),
         status: draft.status,
@@ -825,6 +826,7 @@ export function useWorkspace({
 
     void runMutation(
       () => api.createStepDependency(workspaceId, {
+        author_type: "human",
         idempotency_key: crypto.randomUUID(),
         source_step_id: source.id,
         target_step_id: target.id,

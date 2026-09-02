@@ -8,12 +8,12 @@ Lemma is an IDE-like reasoning workspace where humans and AI agents work on the 
 - A searchable library of empty workspace shells that can contain multiple independent objectives.
 - Workspace-general and objective-specific text, link, private PDF, and private image context.
 - Objective-scoped strategies with lineage-preserving branches and Markdown + TeX reasoning steps.
-- Optimistic revisions, idempotent graph mutations, authorship, provenance, activity, assumptions, explicit dependency/source inspection, and non-destructive dead ends.
+- Optimistic revisions, idempotent graph mutations, authorship, provenance, activity, assumptions, explicit dependency/source inspection, atomic step creation with known prerequisites, and non-destructive dead ends.
 - Human intervention and decision resolution that remain visible to agents.
 - Structural branch comparison and clean-solution projection without deleting history.
 - Atomic branch/strategy completion plus editable successful, unsuccessful, or inconclusive results per strategy or branch.
 - Workspace-scoped hybrid step retrieval, optionally narrowed to one objective, backed by Postgres full-text search and pgvector.
-- Twenty-one top-level imperative WebMCP tools with shared Zod schemas, agent provenance, cancellation, safe cleanup, and immediate UI refresh/highlighting.
+- Twenty-two top-level imperative WebMCP tools with shared Zod schemas, agent provenance, cancellation, safe cleanup, and immediate UI refresh/highlighting.
 
 ## Architecture
 
@@ -107,6 +107,7 @@ create_context
 list_strategies
 create_strategy
 create_step
+create_step_dependency
 update_step
 branch_from_step
 mark_assumption

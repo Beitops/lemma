@@ -12,6 +12,7 @@ const BRANCH_ID = "423e4567-e89b-42d3-a456-426614174000";
 const CONTEXT_ID = "523e4567-e89b-42d3-a456-426614174000";
 const RESULT_ID = "623e4567-e89b-42d3-a456-426614174000";
 const STEP_ID = "723e4567-e89b-42d3-a456-426614174000";
+const DEPENDENT_STEP_ID = "923e4567-e89b-42d3-a456-426614174000";
 const DECISION_ID = "823e4567-e89b-42d3-a456-426614174000";
 const TIMESTAMP = "2026-08-31T10:00:00.000Z";
 
@@ -122,13 +123,14 @@ describe("WebMCP registration", () => {
     const { available, calls, controller } = await registerWith(createRuntime({} as LemmaApi).runtime);
 
     expect(available).toBe(true);
-    expect(calls).toHaveLength(21);
+    expect(calls).toHaveLength(22);
     expect(calls.map((call) => call.tool.name).sort()).toEqual([
       "branch_from_step",
       "compare_branches",
       "create_context",
       "create_objective",
       "create_step",
+      "create_step_dependency",
       "create_strategy",
       "find_steps",
       "generate_clean_solution",
@@ -214,7 +216,7 @@ describe("WebMCP registration", () => {
     expect(calls.map((call) => call.tool.name)).not.toContain("resolve_human_decision");
   });
 
-  it("returns trusted v2 instructions without contacting the API", async () => {
+  it("returns trusted v2.2 instructions without contacting the API", async () => {
     const { calls } = await registerWith(createRuntime({} as LemmaApi).runtime);
     const result = await findRegisteredTool(calls, "get_skill").execute(
       {},
@@ -222,7 +224,7 @@ describe("WebMCP registration", () => {
     );
 
     expect(result).toEqual({ ok: true, data: LEMMA_REASONING_WORKSPACE_SKILL });
-    expect(LEMMA_REASONING_WORKSPACE_SKILL.skill_version).toBe("2.0.0");
+    expect(LEMMA_REASONING_WORKSPACE_SKILL.skill_version).toBe("2.2.0");
     expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).not.toContain("set_workspace_result");
     expect(LEMMA_REASONING_WORKSPACE_SKILL.instructions_markdown).not.toContain("workspace objective");
   });
@@ -432,6 +434,104 @@ describe("WebMCP registration", () => {
     });
   });
 
+  it("creates a dependency with agent provenance, then refreshes and highlights its dependent step", async () => {
+    const createStepDependency = vi.fn(async () => ({
+      created: true,
+      dependency_revision: 1,
+      source_step_id: STEP_ID,
+      step_dependency_id: "a23e4567-e89b-42d3-a456-426614174000",
+      target_step_id: DEPENDENT_STEP_ID,
+      workspace_id: WORKSPACE_ID,
+    }));
+    const { highlight, refreshCurrentWorkspace, runtime } = createRuntime(
+      { createStepDependency } as unknown as LemmaApi,
+    );
+    const { calls } = await registerWith(runtime);
+    const signal = new AbortController().signal;
+
+    const response = await findRegisteredTool(calls, "create_step_dependency").execute({
+      idempotency_key: "b23e4567-e89b-42d3-a456-426614174000",
+      source_step_id: STEP_ID,
+      target_step_id: DEPENDENT_STEP_ID,
+      workspace_id: WORKSPACE_ID,
+    }, { signal });
+
+    expect(response).toMatchObject({
+      data: { target_step_id: DEPENDENT_STEP_ID },
+      ok: true,
+    });
+    expect(createStepDependency).toHaveBeenCalledWith(WORKSPACE_ID, {
+      author_agent_name: "Test Agent",
+      author_type: "agent",
+      idempotency_key: "b23e4567-e89b-42d3-a456-426614174000",
+      source_step_id: STEP_ID,
+      target_step_id: DEPENDENT_STEP_ID,
+    }, signal);
+    expect(refreshCurrentWorkspace).toHaveBeenCalledTimes(1);
+    expect(highlight).toHaveBeenCalledWith({
+      id: DEPENDENT_STEP_ID,
+      type: "step",
+    });
+  });
+
+  it("creates a step with known prerequisites atomically, then refreshes and highlights it", async () => {
+    const createStep = vi.fn(async () => ({
+      branch_id: BRANCH_ID,
+      branch_revision: 2,
+      ordinal: 2,
+      step_dependencies: [{
+        dependency_revision: 1,
+        source_step_id: STEP_ID,
+        step_dependency_id: "d23e4567-e89b-42d3-a456-426614174000",
+        target_step_id: DEPENDENT_STEP_ID,
+      }],
+      step_id: DEPENDENT_STEP_ID,
+      step_revision: 1,
+    }));
+    const { highlight, refreshCurrentWorkspace, runtime } = createRuntime(
+      { createStep } as unknown as LemmaApi,
+    );
+    const { calls } = await registerWith(runtime);
+    const signal = new AbortController().signal;
+
+    const response = await findRegisteredTool(calls, "create_step").execute({
+      body_markdown: "The desired conclusion follows from the lemma.",
+      branch_id: BRANCH_ID,
+      depends_on_step_ids: [STEP_ID],
+      expected_branch_revision: 1,
+      idempotency_key: "step-create-001",
+      title: "Apply the lemma",
+    }, { signal });
+
+    expect(response).toMatchObject({
+      data: {
+        step_dependencies: [{
+          source_step_id: STEP_ID,
+          target_step_id: DEPENDENT_STEP_ID,
+        }],
+        step_id: DEPENDENT_STEP_ID,
+      },
+      ok: true,
+    });
+    expect(createStep).toHaveBeenCalledWith(BRANCH_ID, {
+      author_agent_name: "Test Agent",
+      author_type: "agent",
+      body_markdown: "The desired conclusion follows from the lemma.",
+      concepts: [],
+      depends_on_step_ids: [STEP_ID],
+      expected_branch_revision: 1,
+      idempotency_key: "step-create-001",
+      status: "active",
+      theorem_tags: [],
+      title: "Apply the lemma",
+    }, signal);
+    expect(refreshCurrentWorkspace).toHaveBeenCalledTimes(1);
+    expect(highlight).toHaveBeenCalledWith({
+      id: DEPENDENT_STEP_ID,
+      type: "step",
+    });
+  });
+
   it("forwards every retrieval filter with a default limit when the host omits execution options", async () => {
     const findSteps = vi.fn(async (input: { query: string; workspace_id: string }, signal: AbortSignal) => {
       if (signal.aborted) throw new Error("The fallback signal must remain active.");
@@ -488,7 +588,7 @@ describe("WebMCP registration", () => {
     const { result, unmount } = renderHook(() => useWebMcp(createRuntime({} as LemmaApi).runtime));
 
     await waitFor(() => expect(result.current).toBe(true));
-    expect(calls).toHaveLength(21);
+    expect(calls).toHaveLength(22);
     const signal = calls[0]?.options?.signal;
     expect(calls.every((call) => call.options?.signal === signal)).toBe(true);
     unmount();

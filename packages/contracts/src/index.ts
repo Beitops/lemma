@@ -904,6 +904,13 @@ export const createStepInputSchema = z
     branch_id: uuidSchema,
     title: boundedString(240),
     body_markdown: nonEmptyMarkdown(200_000).describe(MATH_MARKDOWN_DESCRIPTION),
+    depends_on_step_ids: z
+      .array(uuidSchema)
+      .max(64)
+      .default([])
+      .describe(
+        "UUIDs of existing prerequisite steps that the new step depends on. Each dependency is created atomically with the new step.",
+      ),
     expected_branch_revision: revisionSchema,
     idempotency_key: idempotencyKeySchema,
     summary: z.string().max(2_000).nullable().optional(),
@@ -914,12 +921,21 @@ export const createStepInputSchema = z
     ...mutationAuthorFields,
   })
   .strict()
-  .superRefine(validateMutationAuthor);
+  .superRefine((value, context) => {
+    validateMutationAuthor(value, context);
+    if (new Set(value.depends_on_step_ids).size !== value.depends_on_step_ids.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["depends_on_step_ids"],
+        message: "depends_on_step_ids must not contain duplicate step IDs.",
+      });
+    }
+  });
 
 /**
  * Creates a directed reasoning edge from a prerequisite source step to a
- * dependent target step. This narrow browser action is always human-authored;
- * the supplied UUID is reused as the persisted edge identifier on retries.
+ * dependent target step. The supplied UUID is reused as the persisted edge
+ * identifier on retries.
  */
 export const createStepDependencyInputSchema = z
   .object({
@@ -929,9 +945,11 @@ export const createStepDependencyInputSchema = z
     idempotency_key: uuidSchema.describe(
       "A caller-generated UUID that makes a dependency connection retry safe.",
     ),
+    ...mutationAuthorFields,
   })
   .strict()
   .superRefine((value, context) => {
+    validateMutationAuthor(value, context);
     if (value.source_step_id === value.target_step_id) {
       context.addIssue({
         code: "custom",
@@ -1128,7 +1146,7 @@ export const getSkillInputSchema = z.object({}).strict();
 export const getSkillResultSchema = z
   .object({
     skill_name: z.literal("lemma_reasoning_workspace"),
-    skill_version: z.literal("2.0.0"),
+    skill_version: z.literal("2.2.0"),
     required_first_tool: z.literal("get_skill"),
     instructions_markdown: nonEmptyMarkdown(20_000),
   })
@@ -1140,7 +1158,7 @@ export const getSkillResultSchema = z
  */
 export const LEMMA_REASONING_WORKSPACE_SKILL = {
   skill_name: "lemma_reasoning_workspace",
-  skill_version: "2.0.0",
+  skill_version: "2.2.0",
   required_first_tool: "get_skill",
   instructions_markdown: `# Lemma reasoning workspace
 
@@ -1156,6 +1174,8 @@ Recommended reading order:
 4. Use \`find_steps\` for bounded retrieval. Every request must include \`workspace_id\`; it is workspace-wide by default and may return steps from other objectives in that workspace. Pass any combination of \`objective_id\`, \`strategy_id\`, \`branch_id\`, and \`status\` only when intentionally narrowing the search. The server validates that these scopes belong together. The result's \`retrieval_mode\` tells you whether it used hybrid retrieval or a lexical fallback, and \`embedding_model\` is server metadata, never a tool input. For structural questions—lineage, dependencies, assumptions, and sources—inspect the explicit graph relations returned by the selected objective.
 
 General context is available to every objective. Objective context is available only to the selected objective. Always state the intended context scope explicitly when creating context; do not treat objective-specific material as workspace-general. Preserve history. Add or revise a step instead of overwriting a line of reasoning; create \`branch_from_step\` when exploring an alternative; use \`mark_dead_end\` for a failed path rather than deleting it. Dependencies and branch comparisons must remain within one objective.
+
+When creating a new step with known prerequisites, pass their IDs in \`depends_on_step_ids\` to \`create_step\` so the step and its dependency edges are created atomically. Each supplied ID is a prerequisite source, and the new step is the dependent target. Use \`create_step_dependency\` only to connect two already-existing steps. Read the objective graph first so every prerequisite belongs to the same objective. Do not create a self-dependency, duplicate an existing active dependency, or introduce a cycle; the server rejects all three. A dependency is an explicit graph relation, not prose inferred from the two steps.
 
 Use the current optimistic revisions supplied by the graph. Every graph mutation needs a new, stable idempotency key so retries are safe. If a mutation reports a revision conflict, do not guess or retry with stale data: refetch the affected objective or target, reconcile the human's changes, and then issue a new intentional mutation.
 
@@ -1301,6 +1321,16 @@ export const createStrategyResultSchema = z
   })
   .strict();
 
+/** A dependency created atomically while creating its dependent step. */
+export const createStepDependencyReceiptSchema = z
+  .object({
+    step_dependency_id: uuidSchema,
+    dependency_revision: revisionSchema,
+    source_step_id: uuidSchema,
+    target_step_id: uuidSchema,
+  })
+  .strict();
+
 export const createStepResultSchema = z
   .object({
     step_id: uuidSchema,
@@ -1308,6 +1338,7 @@ export const createStepResultSchema = z
     branch_id: uuidSchema,
     branch_revision: revisionSchema,
     ordinal: z.number().int().positive().max(1_000_000),
+    step_dependencies: z.array(createStepDependencyReceiptSchema).max(64).default([]),
   })
   .strict();
 
@@ -1610,9 +1641,17 @@ export const webMcpToolRegistry = {
   create_step: toolSchema(
     "create_step",
     "Create step",
-    "Append a step to an active branch when the expected branch revision is current. This mutation is idempotent for the supplied idempotency_key.",
+    "Append a step to an active branch when the expected branch revision is current. When its known prerequisites already exist, provide their IDs in depends_on_step_ids to create directed prerequisite dependencies atomically with the new step. Each prerequisite must belong to the same objective; duplicate prerequisites are rejected. This mutation is idempotent for the supplied idempotency_key.",
     createStepInputSchema,
     createStepResultSchema,
+    false,
+  ),
+  create_step_dependency: toolSchema(
+    "create_step_dependency",
+    "Create step dependency",
+    "Create an explicit directed dependency from source_step_id (the prerequisite) to target_step_id (the dependent step) in one workspace. Both steps must belong to the same objective; self-dependencies, duplicate active dependencies, and cycles are rejected. This mutation is idempotent for the supplied UUID idempotency_key.",
+    createStepDependencyInputSchema,
+    createStepDependencyResultSchema,
     false,
   ),
   update_step: toolSchema(
@@ -1725,6 +1764,10 @@ export const createStrategyInputJsonSchema = webMcpToolRegistry.create_strategy.
 export const createStrategyResultJsonSchema = webMcpToolRegistry.create_strategy.result_json_schema;
 export const createStepInputJsonSchema = webMcpToolRegistry.create_step.input_json_schema;
 export const createStepResultJsonSchema = webMcpToolRegistry.create_step.result_json_schema;
+export const createStepDependencyInputJsonSchema =
+  webMcpToolRegistry.create_step_dependency.input_json_schema;
+export const createStepDependencyResultJsonSchema =
+  webMcpToolRegistry.create_step_dependency.result_json_schema;
 export const updateStepInputJsonSchema = webMcpToolRegistry.update_step.input_json_schema;
 export const updateStepResultJsonSchema = webMcpToolRegistry.update_step.result_json_schema;
 export const branchFromStepInputJsonSchema = webMcpToolRegistry.branch_from_step.input_json_schema;

@@ -447,14 +447,6 @@ export function createSupabaseAuthenticator(
   };
 }
 
-function databaseErrorCode(error: unknown): string | undefined {
-  if (typeof error !== "object" || error === null) {
-    return undefined;
-  }
-  const code = (error as Record<string, unknown>).code;
-  return typeof code === "string" ? code : undefined;
-}
-
 function recordValue(value: unknown, message: string): RecordInput {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new ApiError("INTERNAL_ERROR", message, 500);
@@ -917,6 +909,7 @@ export class SupabaseGraphService implements GraphService {
   }
 
   public createStep(input: RecordInput): Promise<unknown> {
+    const dependencyStepIds = stringArray(input, "depends_on_step_ids") ?? [];
     return this.rpc("create_step", {
       p_body_markdown: requiredString(input, "body_markdown"),
       p_branch_id: requiredString(input, "branch_id"),
@@ -929,83 +922,20 @@ export class SupabaseGraphService implements GraphService {
       p_theorem_tags: optional(stringArray(input, "theorem_tags")),
       p_title: requiredString(input, "title"),
       ...actorArguments(input),
+      ...(dependencyStepIds.length > 0
+        ? { p_depends_on_step_ids: dependencyStepIds }
+        : {}),
     });
   }
 
-  public async createStepDependency(input: RecordInput): Promise<unknown> {
-    const workspaceId = requiredString(input, "workspace_id");
-    const sourceStepId = requiredString(input, "source_step_id");
-    const targetStepId = requiredString(input, "target_step_id");
-    const idempotencyKey = requiredString(input, "idempotency_key");
-
-    if (sourceStepId === targetStepId) {
-      throw new ApiError("VALIDATION_ERROR", "A step cannot depend on itself.", 400);
-    }
-
-    await this.workspaceRow(workspaceId);
-    const [sourceStep, targetStep] = await Promise.all([
-      this.stepRowInWorkspace(sourceStepId, workspaceId),
-      this.stepRowInWorkspace(targetStepId, workspaceId),
-    ]);
-    const [sourceObjectiveId, targetObjectiveId] = await Promise.all([
-      this.strategyObjectiveId(requiredString(sourceStep, "strategy_id"), workspaceId),
-      this.strategyObjectiveId(requiredString(targetStep, "strategy_id"), workspaceId),
-    ]);
-    if (sourceObjectiveId !== targetObjectiveId) {
-      throw new ApiError(
-        "VALIDATION_ERROR",
-        "A step dependency cannot cross objectives.",
-        400,
-      );
-    }
-
-    const existing = await this.activeStepDependencyRow(workspaceId, sourceStepId, targetStepId);
-    if (existing) {
-      return this.stepDependencyResult(existing, workspaceId, sourceStepId, targetStepId, false);
-    }
-
-    const result = await this.supabase
-      .from("step_dependencies")
-      .insert({
-        author_type: "human",
-        depends_on_step_id: sourceStepId,
-        id: idempotencyKey,
-        rationale_markdown: "",
-        relation_kind: "logical",
-        status: "active",
-        step_id: targetStepId,
-        workspace_id: workspaceId,
-      })
-      .select("id, revision")
-      .single();
-
-    if (result.error) {
-      if (databaseErrorCode(result.error) === "23505") {
-        const racedDependency = await this.activeStepDependencyRow(
-          workspaceId,
-          sourceStepId,
-          targetStepId,
-        );
-        if (racedDependency) {
-          return this.stepDependencyResult(
-            racedDependency,
-            workspaceId,
-            sourceStepId,
-            targetStepId,
-            false,
-          );
-        }
-      }
-      throw asApiError(result.error);
-    }
-
-    return this.stepDependencyResult(
-      recordValue(result.data, "The database did not return the created dependency."),
-      workspaceId,
-      sourceStepId,
-      targetStepId,
-      true,
-    );
+  public createStepDependency(input: RecordInput): Promise<unknown> {
+    return this.rpc("create_step_dependency", {
+      p_idempotency_key: requiredString(input, "idempotency_key"),
+      p_source_step_id: requiredString(input, "source_step_id"),
+      p_target_step_id: requiredString(input, "target_step_id"),
+      p_workspace_id: requiredString(input, "workspace_id"),
+      ...actorArguments(input),
+    });
   }
 
   public updateStep(input: RecordInput): Promise<unknown> {
@@ -1280,54 +1210,6 @@ export class SupabaseGraphService implements GraphService {
       throw notFound("Step");
     }
     return step as RecordInput;
-  }
-
-  private async stepRowInWorkspace(stepId: string, workspaceId: string): Promise<RecordInput> {
-    const result = await this.supabase
-      .from("steps")
-      .select("id, strategy_id")
-      .eq("id", stepId)
-      .eq("workspace_id", workspaceId)
-      .maybeSingle();
-    const step = responseOrThrow(result);
-    if (!step) {
-      throw notFound("Step");
-    }
-    return step as RecordInput;
-  }
-
-  private async activeStepDependencyRow(
-    workspaceId: string,
-    sourceStepId: string,
-    targetStepId: string,
-  ): Promise<RecordInput | null> {
-    const result = await this.supabase
-      .from("step_dependencies")
-      .select("id, revision")
-      .eq("workspace_id", workspaceId)
-      .eq("depends_on_step_id", sourceStepId)
-      .eq("step_id", targetStepId)
-      .eq("status", "active")
-      .maybeSingle();
-    const dependency = responseOrThrow(result);
-    return dependency ? recordValue(dependency, "The database returned an invalid dependency.") : null;
-  }
-
-  private stepDependencyResult(
-    dependency: RecordInput,
-    workspaceId: string,
-    sourceStepId: string,
-    targetStepId: string,
-    created: boolean,
-  ) {
-    return {
-      created,
-      dependency_revision: requiredNumber(dependency, "revision"),
-      source_step_id: sourceStepId,
-      step_dependency_id: requiredString(dependency, "id"),
-      target_step_id: targetStepId,
-      workspace_id: workspaceId,
-    };
   }
 
   private async branchRow(branchId: string): Promise<RecordInput> {

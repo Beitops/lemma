@@ -129,7 +129,8 @@ Hace idempotente `create_workspace`, que todavía no dispone de UUID de workspac
 | `create_objective`, `update_objective` | Crear o editar un objetivo del workspace. |
 | `create_context_item` | Crear contexto general o específico; para uploads acepta el UUID ya usado en Storage. |
 | `create_strategy` | Crear strategy y rama raíz de forma atómica. |
-| `create_step`, `update_step`, `mark_step_dead_end` | Mantener pasos e historia. |
+| `create_step`, `update_step`, `mark_step_dead_end` | Mantener pasos e historia; `create_step` también puede crear sus dependencias conocidas en la misma transacción. |
+| `create_step_dependency` | Crear una dependencia lógica explícita y acíclica entre pasos del mismo objective. |
 | `branch_from_step`, `mark_branch_completed` | Crear alternativas o completar una rama. |
 | `set_reasoning_result` | Crear o editar un outcome de strategy/branch. |
 | `mark_assumption` | Crear y conectar una hypothesis. |

@@ -24,6 +24,14 @@ const objectiveId = "55555555-5555-4555-8555-555555555555";
 const strategyId = "66666666-6666-4666-8666-666666666666";
 const branchId = "77777777-7777-4777-8777-777777777777";
 const decisionId = "88888888-8888-4888-8888-888888888888";
+const sourceStepId = "99999999-9999-4999-8999-999999999999";
+const targetStepId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const stepDependencyId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const secondSourceStepId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const boundedDependencyIds = Array.from(
+  { length: 64 },
+  (_, index) => `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+);
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -694,6 +702,260 @@ it("maps a decision resolution to the human-only typed RPC signature", async () 
     }),
     "resolution RPC has only the typed five-argument payload",
   );
+});
+
+it("maps ordered agent-authored step dependencies to the create-step RPC", async () => {
+  const calls: Array<{ arguments_: Record<string, unknown>; functionName: string }> = [];
+  const service = new SupabaseGraphService({
+    rpc: async (functionName: string, arguments_: Record<string, unknown>) => {
+      calls.push({ arguments_, functionName });
+      return {
+        data: {
+          branch_id: branchId,
+          branch_revision: 2,
+          ordinal: 1,
+          step_dependencies: [
+            {
+              dependency_revision: 1,
+              source_step_id: sourceStepId,
+              step_dependency_id: stepDependencyId,
+              target_step_id: targetStepId,
+            },
+          ],
+          step_id: targetStepId,
+          step_revision: 1,
+        },
+        error: null,
+      };
+    },
+  } as unknown as AuthenticatedUser["supabase"]);
+
+  await service.createStep({
+    author_agent_name: "Step Agent",
+    author_type: "agent",
+    body_markdown: "Apply the prerequisite result.",
+    branch_id: branchId,
+    concepts: ["substitution"],
+    depends_on_step_ids: [sourceStepId, secondSourceStepId],
+    expected_branch_revision: 1,
+    idempotency_key: "step-create-dependencies-001",
+    status: "active",
+    theorem_tags: ["algebra"],
+    title: "Use prior results",
+  });
+
+  assertEqual(calls[0]?.functionName, "create_step", "step RPC name");
+  assertEqual(
+    JSON.stringify(calls[0]?.arguments_.p_depends_on_step_ids),
+    JSON.stringify([sourceStepId, secondSourceStepId]),
+    "step RPC preserves prerequisite source ordering",
+  );
+  assertEqual(calls[0]?.arguments_.p_author_type, "agent", "step RPC preserves agent author type");
+  assertEqual(
+    calls[0]?.arguments_.p_author_agent_name,
+    "Step Agent",
+    "step RPC preserves agent provenance",
+  );
+});
+
+it("omits the dependency RPC argument when create-step has no prerequisites", async () => {
+  const calls: Array<{ arguments_: Record<string, unknown>; functionName: string }> = [];
+  const service = new SupabaseGraphService({
+    rpc: async (functionName: string, arguments_: Record<string, unknown>) => {
+      calls.push({ arguments_, functionName });
+      return {
+        data: {
+          branch_id: branchId,
+          branch_revision: 2,
+          ordinal: 1,
+          step_id: targetStepId,
+          step_revision: 1,
+        },
+        error: null,
+      };
+    },
+  } as unknown as AuthenticatedUser["supabase"]);
+
+  await service.createStep({
+    author_type: "human",
+    body_markdown: "A standalone step.",
+    branch_id: branchId,
+    depends_on_step_ids: [],
+    expected_branch_revision: 1,
+    idempotency_key: "step-create-without-dependencies-001",
+    title: "Standalone step",
+  });
+
+  assertEqual(calls[0]?.functionName, "create_step", "step RPC name without dependencies");
+  assert(
+    !("p_depends_on_step_ids" in (calls[0]?.arguments_ ?? {})),
+    "empty prerequisites should preserve compatibility with the legacy RPC signature",
+  );
+});
+
+it("validates bounded step dependencies and routes them through the branch-scoped endpoint", async () => {
+  let stepInput: Record<string, unknown> | undefined;
+  let createCalls = 0;
+  const api = handler(graphService({
+    createStep: async (input) => {
+      createCalls += 1;
+      stepInput = input;
+      return {
+        branch_id: branchId,
+        branch_revision: 2,
+        ordinal: 1,
+        step_dependencies: [],
+        step_id: targetStepId,
+        step_revision: 1,
+      };
+    },
+  }));
+  const headers = { Authorization: "Bearer test-token", "Content-Type": "application/json" };
+
+  const created = await api(request(`/api/v1/branches/${branchId}/steps`, {
+    body: JSON.stringify({
+      author_agent_name: "Step Agent",
+      author_type: "agent",
+      body_markdown: "Apply the prerequisite result.",
+      branch_id: otherWorkspaceId,
+      depends_on_step_ids: boundedDependencyIds,
+      expected_branch_revision: 1,
+      idempotency_key: "step-create-dependencies-002",
+      title: "Use bounded dependencies",
+    }),
+    headers,
+    method: "POST",
+  }));
+  const createdPayload = await readJson(created);
+  assertEqual(created.status, 201, "step creation with bounded dependencies status");
+  assertEqual(stepInput?.branch_id, branchId, "route controls step branch");
+  assertEqual(
+    JSON.stringify(stepInput?.depends_on_step_ids),
+    JSON.stringify(boundedDependencyIds),
+    "route forwards the bounded prerequisite list in order",
+  );
+  assertEqual(stepInput?.author_type, "agent", "route retains step agent author type");
+  assertEqual(stepInput?.author_agent_name, "Step Agent", "route retains step agent provenance");
+  assertEqual(
+    ((createdPayload.data as Record<string, unknown>).step_dependencies as unknown[]).length,
+    0,
+    "create-step result permits no dependencies when none were created",
+  );
+
+  const overLimit = await api(request(`/api/v1/branches/${branchId}/steps`, {
+    body: JSON.stringify({
+      author_agent_name: "Step Agent",
+      author_type: "agent",
+      body_markdown: "This list must be rejected before reaching the service.",
+      depends_on_step_ids: [
+        ...boundedDependencyIds,
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      ],
+      expected_branch_revision: 2,
+      idempotency_key: "step-create-dependencies-003",
+      title: "Too many dependencies",
+    }),
+    headers,
+    method: "POST",
+  }));
+  assertEqual(overLimit.status, 400, "over-limit step dependencies are rejected");
+  assertEqual(createCalls, 1, "over-limit dependencies never reach the graph service");
+});
+
+it("maps an agent-authored dependency to the receipt-backed RPC signature", async () => {
+  const calls: Array<{ arguments_: Record<string, unknown>; functionName: string }> = [];
+  const service = new SupabaseGraphService({
+    rpc: async (functionName: string, arguments_: Record<string, unknown>) => {
+      calls.push({ arguments_, functionName });
+      return {
+        data: {
+          created: true,
+          dependency_revision: 1,
+          source_step_id: sourceStepId,
+          step_dependency_id: stepDependencyId,
+          target_step_id: targetStepId,
+          workspace_id: workspaceId,
+        },
+        error: null,
+      };
+    },
+  } as unknown as AuthenticatedUser["supabase"]);
+
+  await service.createStepDependency({
+    author_agent_name: "Dependency Agent",
+    author_type: "agent",
+    idempotency_key: stepDependencyId,
+    source_step_id: sourceStepId,
+    target_step_id: targetStepId,
+    workspace_id: workspaceId,
+  });
+
+  assertEqual(calls[0]?.functionName, "create_step_dependency", "dependency RPC name");
+  assertEqual(
+    JSON.stringify(calls[0]?.arguments_),
+    JSON.stringify({
+      p_idempotency_key: stepDependencyId,
+      p_source_step_id: sourceStepId,
+      p_target_step_id: targetStepId,
+      p_workspace_id: workspaceId,
+      p_author_type: "agent",
+      p_author_agent_name: "Dependency Agent",
+    }),
+    "dependency RPC preserves source/target orientation and agent provenance",
+  );
+});
+
+it("validates and routes agent dependency provenance through the workspace-scoped endpoint", async () => {
+  let dependencyInput: Record<string, unknown> | undefined;
+  const api = handler(graphService({
+    createStepDependency: async (input) => {
+      dependencyInput = input;
+      return {
+        created: true,
+        dependency_revision: 1,
+        source_step_id: sourceStepId,
+        step_dependency_id: stepDependencyId,
+        target_step_id: targetStepId,
+        workspace_id: workspaceId,
+      };
+    },
+  }));
+  const headers = { Authorization: "Bearer test-token", "Content-Type": "application/json" };
+
+  const created = await api(request(`/api/v1/workspaces/${workspaceId}/step-dependencies`, {
+    body: JSON.stringify({
+      author_agent_name: "Dependency Agent",
+      author_type: "agent",
+      idempotency_key: stepDependencyId,
+      source_step_id: sourceStepId,
+      target_step_id: targetStepId,
+      workspace_id: otherWorkspaceId,
+    }),
+    headers,
+    method: "POST",
+  }));
+  assertEqual(created.status, 201, "agent dependency creation status");
+  assertEqual(dependencyInput?.workspace_id, workspaceId, "route controls dependency workspace");
+  assertEqual(dependencyInput?.source_step_id, sourceStepId, "route retains prerequisite source");
+  assertEqual(dependencyInput?.target_step_id, targetStepId, "route retains dependent target");
+  assertEqual(dependencyInput?.author_type, "agent", "route retains agent author type");
+  assertEqual(
+    dependencyInput?.author_agent_name,
+    "Dependency Agent",
+    "route retains agent provenance",
+  );
+
+  const invalid = await api(request(`/api/v1/workspaces/${workspaceId}/step-dependencies`, {
+    body: JSON.stringify({
+      author_type: "agent",
+      idempotency_key: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      source_step_id: sourceStepId,
+      target_step_id: targetStepId,
+    }),
+    headers,
+    method: "POST",
+  }));
+  assertEqual(invalid.status, 400, "agent dependency without provenance is rejected");
 });
 
 it("rejects ambiguous context scope before contacting the graph service", async () => {
