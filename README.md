@@ -1,45 +1,92 @@
 # Lemma
 
-Lemma is an IDE-like reasoning workspace where humans and AI agents work on the same inspectable mathematical graph. The visual workspace is the human interface, WebMCP is the agent interface, and both use the same authenticated Supabase Edge API and Postgres reasoning graph.
+Lemma is an IDE-like workspace where humans and AI agents reason over the same inspectable mathematical graph. The visual workspace is the human interface, WebMCP is the agent interface, and neither has a separate copy of the reasoning state.
 
-## MVP capabilities
+**Try the app:** [https://lemma-tan.vercel.app/](https://lemma-tan.vercel.app/)
 
-- Email/password registration and sign-in with Supabase Auth.
-- A searchable library of empty workspace shells that can contain multiple independent objectives.
-- Workspace-general and objective-specific text, link, private PDF, and private image context.
-- Objective-scoped strategies with lineage-preserving branches and Markdown + TeX reasoning steps.
-- Optimistic revisions, idempotent graph mutations, authorship, provenance, activity, assumptions, explicit dependency/source inspection, atomic step creation with known prerequisites, and non-destructive dead ends.
-- Human intervention and decision resolution that remain visible to agents.
-- Structural branch comparison and clean-solution projection without deleting history.
-- Atomic branch/strategy completion plus editable successful, unsuccessful, or inconclusive results per strategy or branch.
-- Workspace-scoped hybrid step retrieval, optionally narrowed to one objective, backed by Postgres full-text search and pgvector.
-- Authenticated Supabase Realtime invalidation with canonical API reconciliation, reconnect recovery, and a manual-refresh fallback.
-- Twenty-two top-level imperative WebMCP tools with shared Zod schemas, per-tab agent provenance, cancellation, safe cleanup, and immediate UI refresh/highlighting.
+## How to use Lemma
 
-## Architecture
+1. Create an account, sign in, and create a workspace from the dashboard.
+2. Add one or more mathematical objectives. Each objective can have its own constraints and context, while the workspace can also hold context shared by every objective.
+3. Create strategies for an objective. Every strategy starts with a root branch.
+4. Develop the reasoning as Markdown + TeX steps. Steps can have explicit dependencies, assumptions, sources, authorship, and status.
+5. Interrupt the reasoning at any point: revise a step, branch from an earlier step, add a human idea, request a decision, or mark a path as a dead end without deleting it.
+6. Compare branches, record the outcome of a strategy or branch, and generate a clean solution from the selected path while preserving the complete graph history.
+
+The central workflow is **interrupt, branch, continue**: a human changes direction midway through a solution and an agent reads the updated workspace through WebMCP, then continues from the new state without overwriting the original path.
+
+Mathematical content uses Markdown with inline TeX such as `$x^2 + y^2$` and display TeX such as `$$x = \frac{-b \pm \sqrt{b^2-4ac}}{2a}$$`.
+
+## Reasoning model
+
+The persisted reasoning graph is the source of truth. A clean solution is only a projection of one selected branch.
+
+| Entity | Role |
+| --- | --- |
+| **Workspace** | Top-level container for related mathematical work, shared context, and multiple objectives. |
+| **Objective** | A precise problem or desired result, with its own constraints, context, and strategies. |
+| **Context item** | Supporting text, note, link, image, PDF, or paper shared by the workspace or scoped to one objective. |
+| **Strategy** | A high-level approach to an objective. An objective can keep several strategies in parallel. |
+| **Branch** | One path through a strategy. It stores its parent and exact fork point so alternatives remain inspectable. |
+| **Step** | A single reasoning move written in Markdown + TeX, with explicit branch membership, author, status, and revision history. |
+| **Step dependency** | A directed relation between a prerequisite step and a dependent step in the same objective. |
+| **Assumption** | A first-class statement that can be proposed, accepted, challenged, rejected, or discharged and linked to the steps that use it. |
+| **Source** | Explicit provenance for a step, such as context, a URL, paper, book, or theorem. |
+| **Decision** | A human intervention or checkpoint that an agent can request and a human can resolve. |
+| **Reasoning result** | A successful, unsuccessful, or inconclusive outcome attached to a strategy or branch. |
+
+## WebMCP tools
+
+The top-level page registers 22 imperative WebMCP tools. Agents should call `get_skill` first in every new session to load Lemma's trusted, versioned operating instructions.
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ get_skill                  get_workspace             list_objectives          │
+│ get_objective              create_objective          update_objective         │
+│ get_context                create_context            list_strategies          │
+│ create_strategy            create_step               create_step_dependency   │
+│ update_step                branch_from_step          mark_assumption           │
+│ mark_dead_end              mark_end                  set_reasoning_result      │
+│ find_steps                 compare_branches          request_human_decision    │
+│ generate_clean_solution                                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+All tools use narrow JSON Schemas generated from the same Zod contracts as the application API. Mutations use the signed-in session, record agent provenance, support safe retries, and refresh the same graph shown in the UI. If WebMCP is unavailable, the human interface remains fully usable.
+
+## Stack
+
+- **Frontend:** React 19, Vite, strict TypeScript, React Router, XYFlow, and Dagre.
+- **Math rendering:** `react-markdown`, `remark-math`, and KaTeX.
+- **Shared contracts:** Zod schemas in `packages/contracts`, reused by the frontend, API, and WebMCP layer.
+- **Backend:** Supabase Auth, Postgres, Row Level Security, Storage, Realtime, Edge Functions, and pgvector.
+- **Hosting:** Vercel for the web client and Supabase for backend services.
 
 ```text
 apps/
-  web/          React 19 + Vite client with declarative React Router routes
+  web/                    React + Vite client
 packages/
-  contracts/    Canonical Zod schemas, inferred types, API and WebMCP contracts
+  contracts/              Shared Zod, API, and WebMCP contracts
 supabase/
-  functions/    Authenticated `lemma-api` Edge Function
-  migrations/   Relational graph, RLS, RPCs, search, and additive fixes
-  tests/        Database invariant and security fixtures
+  functions/lemma-api/    Authenticated /api/v1 Edge API
+  functions/embed-steps/  Asynchronous embedding worker
+  migrations/             Relational graph, RLS, RPCs, and retrieval
+  tests/                  Database invariant and security fixtures
 ```
 
-All graph writes go through the versioned `/api/v1` routes in `lemma-api`. Each request carries the user's access token and the function creates a caller-scoped Supabase client, so RLS remains authoritative. The function never uses a service-role key. Transactional graph invariants remain in the existing Postgres RPCs rather than being reimplemented in the Edge runtime.
+## Backend architecture
 
-The browser uses Supabase directly for authentication and private Storage uploads. Files of 6 MiB or less use a standard immutable upload; larger files use resumable TUS uploads in 6 MiB chunks. The Edge API then validates and records the uploaded object's metadata. Upload identity and path are stable across retries; if metadata finalization fails after a newly-created upload, the browser attempts to remove the orphaned object.
+`lemma-api` is a thin, versioned Edge Function. It validates requests and responses with the shared Zod schemas, forwards the caller's Supabase session, and delegates multi-record graph mutations to transactional Postgres RPCs. Those RPCs enforce branch lineage, graph invariants, idempotency, and optimistic revisions; RLS keeps every workspace owner-scoped. The browser talks to Supabase directly only for authentication, private uploads, and authorized Realtime invalidation.
 
-The web client keeps reusable UI in `src/components`, while `src/pages/auth`, `src/pages/dashboard`, and `src/pages/workspace` own each page's components, hooks, tests, and page-specific graph helpers. Cross-cutting hooks and clients remain in `src/hooks` and `src/lib`.
+Lemma also includes a small RAG-style retrieval layer over reasoning steps. A private search document is updated after relevant graph mutations and queued through PGMQ; `pg_cron` and `pg_net` invoke the `embed-steps` Edge Function asynchronously. For the demo, both stored steps and queries use Supabase Edge Runtime's built-in **`gte-small` embedding model with 384 dimensions** (mean pooling, normalization, and cosine distance). `find_steps` combines pgvector similarity with Postgres full-text search using deterministic reciprocal rank fusion and falls back to lexical search if embedding fails.
 
-Routing uses React Router only in declarative library mode (`BrowserRouter`, `Routes`, and `Route`), without framework loaders, actions, or `RouterProvider`. The route surface is `/`, `/workspaces/:workspaceId`, and `/workspaces/:workspaceId/objectives/:objectiveId`; unknown authenticated routes return to the dashboard. Authentication remains above the route switch so signing in from a valid deep link opens that workspace directly.
+The RAG layer is associative memory only: it can find where an idea appeared, but structural questions such as dependencies, assumptions, and branch lineage always traverse the explicit reasoning graph. See [the semantic retrieval notes](docs/semantic-step-retrieval.md) and [the database overview](docs/supabase-database.md) for implementation details.
 
-## Local setup
+## Installation
 
-Requirements: Node.js 22 or newer, pnpm 11, and the Supabase CLI. Docker is also required when running the local Supabase stack or database tests.
+Requirements: Node.js 22 or newer, pnpm 11, and the Supabase CLI. Docker is also required for the local Supabase stack and database tests.
+
+### Run the web app against a configured Supabase project
 
 ```bash
 pnpm install
@@ -47,50 +94,55 @@ cp .env.example .env.local
 pnpm dev
 ```
 
-Fill `.env.local` with the browser-safe Supabase project URL and publishable key. `VITE_API_URL` is optional; by default the client derives `https://<project>.supabase.co/functions/v1/lemma-api/api/v1`. If this checkout still has the former `http://localhost:8787/api/v1` override, remove it or replace it with the Edge URL. The local web origin can be either `http://localhost:5173` or `http://127.0.0.1:5173`.
+Set the browser-safe project URL and publishable key in `.env.local`:
 
-For a fully local stack, set `VITE_SUPABASE_URL=http://127.0.0.1:54321`, copy the publishable key reported by `supabase status` into `VITE_SUPABASE_PUBLISHABLE_KEY`, and set `VITE_API_URL=http://127.0.0.1:54321/functions/v1/lemma-api/api/v1`. Local Edge configuration lives separately so Vite never receives server-only variables:
+```dotenv
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_your_key
+```
+
+`VITE_API_URL` is optional. By default, the client derives `https://<project>.supabase.co/functions/v1/lemma-api/api/v1` from `VITE_SUPABASE_URL`.
+
+### Run with local Supabase
+
+Create the local Edge Function environment:
 
 ```bash
 cp supabase/functions/.env.example supabase/functions/.env
 ```
 
-The local Edge runtime reaches Supabase through Docker's internal gateway, while browser access tokens name the public local Auth URL as their issuer. `LEMMA_AUTH_ISSUER` records that public issuer explicitly; hosted deployments normally omit it and derive the issuer from `SUPABASE_URL`.
-
-Then run the local stack and function in one terminal:
+Then start the local Supabase services and the public API in one terminal:
 
 ```bash
 supabase start
 pnpm edge:serve
 ```
 
-Run `pnpm dev` in another terminal.
+Use the values reported by `supabase status` in `.env.local`:
 
-The function reads `SUPABASE_URL` and `SUPABASE_ANON_KEY` supplied by Supabase plus the comma-separated `WEB_ORIGIN` allowlist from `supabase/functions/.env`. Its gateway JWT check is deliberately disabled in `supabase/config.toml`: the handler verifies every non-public Bearer token itself so authentication failures retain Lemma's stable JSON error envelope. Only `/api/v1/health` and CORS preflight are public.
+```dotenv
+VITE_SUPABASE_URL=http://127.0.0.1:54321
+VITE_SUPABASE_PUBLISHABLE_KEY=your-local-publishable-key
+VITE_API_URL=http://127.0.0.1:54321/functions/v1/lemma-api/api/v1
+```
 
-Before deploying the web client, apply the database migrations and deploy the function:
+Run `pnpm dev` in a second terminal. Only `/api/v1/health` and CORS preflight are public; the function validates bearer tokens itself so errors keep Lemma's stable JSON envelope.
+
+### Deploy your own backend
+
+Apply the migrations, generate database types, configure the allowed web origin, and deploy both Edge Functions:
 
 ```bash
 supabase db push
 supabase gen types typescript --linked > supabase/database.types.ts
 supabase secrets set 'WEB_ORIGIN=http://localhost:5173,http://127.0.0.1:5173,https://your-web-origin.example'
 supabase functions deploy lemma-api --no-verify-jwt --use-api
+supabase functions deploy embed-steps --no-verify-jwt --use-api
 ```
 
-Replace the example production origin before running the secret command. To verify a hosted deployment independently of the browser, send the same preflight request the browser uses:
+Replace the example origin before setting the secret. The embedding worker additionally needs the environment-specific `lemma_project_url` Vault secret described in [the retrieval runbook](docs/semantic-step-retrieval.md). No service-role key is ever exposed to Vite.
 
-```bash
-curl -i -X OPTIONS 'https://<project-ref>.supabase.co/functions/v1/lemma-api/api/v1/workspaces' \
-  -H 'Origin: http://localhost:5173' \
-  -H 'Access-Control-Request-Method: GET' \
-  -H 'Access-Control-Request-Headers: authorization,apikey,content-type'
-```
-
-The expected response is `204` and includes `Access-Control-Allow-Origin: http://localhost:5173`. A gateway `404` with `sb-error-code: NOT_FOUND` means the function has not been deployed to that project; a gateway `401` means it was deployed with JWT verification enabled and must be redeployed with `--no-verify-jwt` because Lemma performs the token verification inside the handler.
-
-Storage uploads use the private `workspace-context` bucket and are opened through short-lived signed URLs returned by the Edge API. Deploy in the order shown above so the aggregate graph RPC exists before the new function receives traffic.
-
-## Quality commands
+### Verify the project
 
 ```bash
 pnpm lint
@@ -100,47 +152,4 @@ pnpm build
 pnpm db:test
 ```
 
-The database tests require a running local Supabase stack. Application and WebMCP tests do not require an authenticated remote user.
-
-## WebMCP surface
-
-The top-level page imperatively registers:
-
-```text
-get_skill
-get_workspace
-list_objectives
-get_objective
-create_objective
-update_objective
-get_context
-create_context
-list_strategies
-create_strategy
-create_step
-create_step_dependency
-update_step
-branch_from_step
-mark_assumption
-mark_dead_end
-mark_end
-set_reasoning_result
-find_steps
-compare_branches
-request_human_decision
-generate_clean_solution
-```
-
-Agents should call `get_skill` first in each new session. It returns trusted, versioned instructions for reading and changing Lemma's reasoning graph. Tool inputs are narrow JSON Schemas generated from the same Zod contracts used by the API. Mutations overwrite caller-provided authorship with agent provenance, validate server responses, forward invocation cancellation, refresh the shared graph after a commit, and use one `AbortController` to unregister cleanly.
-
-The Vite development server and Edge API emit `Origin-Agent-Cluster: ?1`, which current WebMCP discovery requires. A production web host must preserve that header, serve `index.html` as the fallback for client-side deep links, and support a browser with WebMCP enabled. Without WebMCP, the application remains fully usable in human mode.
-
-For the multi-agent demo, Realtime subscribes only to owner-authorized `activity_events` inserts for the open workspace. Notifications are validated and coalesced, then the UI refetches the canonical API snapshot instead of guessing which related rows changed. See [docs/realtime-sync.md](docs/realtime-sync.md) for the deployment check, failure behavior, and per-tab `?agent=` aliases.
-
-## Security model
-
-- Every Data API table has RLS and workspace-owner policies.
-- The Edge API uses a publishable/anon key plus the caller's verified bearer token, never a privileged service-role key.
-- Uploaded files are private, size- and MIME-bounded, stored under user/workspace-scoped immutable paths, and cleaned up when metadata creation fails.
-- Markdown is rendered without raw HTML, `dangerouslySetInnerHTML`, `rehype-raw`, or trusted KaTeX commands.
-- Structural questions traverse explicit relations; semantic retrieval never invents graph edges.
+`pnpm db:test` requires the local Supabase stack to be running.

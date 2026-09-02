@@ -8,7 +8,7 @@ Build an IDE-like collaborative workspace for mathematical reasoning between hum
 - WebMCP is the agent interface;
 - the reasoning graph is the source of truth for both.
 
-The product brief lives in `projectContext.md`. Keep implementation and product decisions consistent with it.
+Keep implementation and product decisions consistent with this mission and the domain invariants below.
 
 ## MVP outcome
 
