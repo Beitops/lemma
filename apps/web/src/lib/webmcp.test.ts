@@ -1,7 +1,7 @@
 import { cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LEMMA_REASONING_WORKSPACE_SKILL, webMcpToolRegistry } from "@lemma/contracts";
-import type { LemmaApi } from "./api";
+import { ApiClientError, type LemmaApi } from "./api";
 import { useWebMcp } from "../hooks/useWebMcp";
 import { registerWebMcpTools, type WebMcpRuntime } from "./webmcp";
 
@@ -258,6 +258,83 @@ describe("WebMCP registration", () => {
       ok: false,
     });
     expect(getWorkspaceOverview).not.toHaveBeenCalled();
+  });
+
+  it("blocks repeated update_step conflicts for the same step revision before they reach the API", async () => {
+    let rejectFirstUpdate: ((reason?: unknown) => void) | undefined;
+    let returnSuccessfulUpdate = false;
+    const updateStep = vi.fn(() => {
+      if (returnSuccessfulUpdate) {
+        return Promise.resolve({
+          branch_id: BRANCH_ID,
+          branch_revision: 5,
+          status: "active" as const,
+          step_id: STEP_ID,
+          step_revision: 5,
+        });
+      }
+      return new Promise<never>((_resolve, reject) => {
+        rejectFirstUpdate = reject;
+      });
+    });
+    const { calls } = await registerWith(
+      createRuntime({ updateStep } as unknown as LemmaApi).runtime,
+    );
+    const tool = findRegisteredTool(calls, "update_step");
+    const signal = new AbortController().signal;
+    const input = {
+      body_markdown: "Use the corrected argument.",
+      expected_step_revision: 3,
+      idempotency_key: "a23e4567-e89b-42d3-a456-426614174000",
+      step_id: STEP_ID,
+    };
+
+    const first = tool.execute(input, { signal });
+    await waitFor(() => expect(updateStep).toHaveBeenCalledTimes(1));
+
+    await expect(tool.execute({
+      ...input,
+      idempotency_key: "b23e4567-e89b-42d3-a456-426614174000",
+    }, { signal })).resolves.toEqual({
+      error: {
+        code: "CONFLICT",
+        message: "An update for this step revision is already in progress. Do not start another update until it finishes.",
+      },
+      ok: false,
+    });
+    expect(updateStep).toHaveBeenCalledTimes(1);
+
+    rejectFirstUpdate?.(new ApiClientError({
+      code: "REVISION_CONFLICT",
+      message: "The step changed.",
+    }, 409));
+    await expect(first).resolves.toEqual({
+      error: { code: "REVISION_CONFLICT", message: "The step changed." },
+      ok: false,
+    });
+
+    await expect(tool.execute({
+      ...input,
+      idempotency_key: "c23e4567-e89b-42d3-a456-426614174000",
+    }, { signal })).resolves.toEqual({
+      error: {
+        code: "REVISION_CONFLICT",
+        message: "This step revision already conflicted. Call get_objective to read the current revision before updating it again.",
+      },
+      ok: false,
+    });
+    expect(updateStep).toHaveBeenCalledTimes(1);
+
+    returnSuccessfulUpdate = true;
+    await expect(tool.execute({
+      ...input,
+      expected_step_revision: 4,
+      idempotency_key: "d23e4567-e89b-42d3-a456-426614174000",
+    }, { signal })).resolves.toMatchObject({
+      data: { step_id: STEP_ID, step_revision: 5 },
+      ok: true,
+    });
+    expect(updateStep).toHaveBeenCalledTimes(2);
   });
 
   it("passes an explicit scope and the invocation signal to context reads", async () => {

@@ -179,6 +179,22 @@ function errorResponse(error: unknown, signal: AbortSignal): WebMcpToolResponse 
   return failure("INTERNAL_ERROR", compactMessage(error, "The Lemma tool could not complete."));
 }
 
+function updateStepRevisionKey(toolName: WebMcpToolName, input: unknown): string | undefined {
+  if (toolName !== "update_step" || !isRecord(input)) return undefined;
+
+  const stepId = input.step_id;
+  const expectedRevision = input.expected_step_revision;
+  if (
+    typeof stepId !== "string" ||
+    typeof expectedRevision !== "number" ||
+    !Number.isSafeInteger(expectedRevision)
+  ) {
+    return undefined;
+  }
+
+  return `${stepId}:${expectedRevision}`;
+}
+
 function cancelledResponse(signal: AbortSignal): WebMcpToolResponse | null {
   return signal.aborted ? failure("CANCELLED", "The tool execution was cancelled.") : null;
 }
@@ -400,7 +416,13 @@ function createToolHandler(
   toolName: WebMcpToolName,
   getRuntime: () => WebMcpRuntime,
 ): WebMCP.ToolExecuteCallback {
-  return async (input, options?: WebMCP.ToolExecuteCallbackOptions): Promise<WebMcpToolResponse> => {
+  const blockedUpdateStepRevisions = new Set<string>();
+  const inFlightUpdateStepRevisions = new Set<string>();
+
+  const execute = async (
+    input: unknown,
+    options?: WebMCP.ToolExecuteCallbackOptions,
+  ): Promise<WebMcpToolResponse> => {
     const signal = options?.signal ?? FALLBACK_EXECUTION_SIGNAL;
     const cancelled = cancelledResponse(signal);
     if (cancelled) return cancelled;
@@ -436,6 +458,36 @@ function createToolHandler(
       return { ok: true, data: result.data };
     } catch (error) {
       return errorResponse(error, signal);
+    }
+  };
+
+  return async (input, options?: WebMCP.ToolExecuteCallbackOptions): Promise<WebMcpToolResponse> => {
+    const revisionKey = updateStepRevisionKey(toolName, input);
+    if (!revisionKey) return execute(input, options);
+
+    if (blockedUpdateStepRevisions.has(revisionKey)) {
+      return failure(
+        "REVISION_CONFLICT",
+        "This step revision already conflicted. Call get_objective to read the current revision before updating it again.",
+      );
+    }
+
+    if (inFlightUpdateStepRevisions.has(revisionKey)) {
+      return failure(
+        "CONFLICT",
+        "An update for this step revision is already in progress. Do not start another update until it finishes.",
+      );
+    }
+
+    inFlightUpdateStepRevisions.add(revisionKey);
+    try {
+      const response = await execute(input, options);
+      if (!response.ok && response.error.code === "REVISION_CONFLICT") {
+        blockedUpdateStepRevisions.add(revisionKey);
+      }
+      return response;
+    } finally {
+      inFlightUpdateStepRevisions.delete(revisionKey);
     }
   };
 }
